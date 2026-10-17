@@ -14,10 +14,10 @@
   "author": "dxu",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dxu/tworee.git"
+    "url": "git+https://github.com/dxu/wobbree.git"
   },
-  "homepage": "https://github.com/dxu/tworee#readme",
-  "bugs": "https://github.com/dxu/tworee/issues",
+  "homepage": "https://github.com/dxu/wobbree#readme",
+  "bugs": "https://github.com/dxu/wobbree/issues",
   "type": "module",
   "exports": {
     ".": {
