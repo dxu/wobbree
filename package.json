@@ -1,0 +1,53 @@
+{
+  "name": "wobbree",
+  "version": "0.1.0",
+  "description": "A minimal library for managing Three.js objects: owners free what they create, and lists keep scene objects in step with your data.",
+  "keywords": [
+    "three",
+    "three.js",
+    "threejs",
+    "webgl",
+    "dispose",
+    "components"
+  ],
+  "license": "MIT",
+  "author": "dxu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dxu/tworee.git"
+  },
+  "homepage": "https://github.com/dxu/tworee#readme",
+  "bugs": "https://github.com/dxu/tworee/issues",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "three": ">=0.150.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "oxlint",
+    "test": "node --test test/*.test.ts",
+    "bench": "node bench/list.bench.ts",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/three": "0.186.0",
+    "oxlint": "1.88.0",
+    "three": "0.186.1",
+    "typescript": "7.0.2"
+  }
+}
