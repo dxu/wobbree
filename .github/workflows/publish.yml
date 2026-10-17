@@ -19,4 +19,5 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install --global npm@11
       - run: npm ci
+      - run: npm run check
       - run: npm publish

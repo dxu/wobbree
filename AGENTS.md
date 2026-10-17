@@ -14,5 +14,5 @@ change protects all three.
 - The README is the documentation. Change it with the API.
 - `npm run check` (types, Oxlint, tests, build) passes before every commit.
 
-Releasing: set the version in `package.json`, then publish a GitHub release; `.github/workflows/publish.yml` publishes
-it to npm through npm's trusted publishing.
+Releasing: set the version in `package.json`, push, then publish a GitHub release for it. `.github/workflows/publish.yml`
+runs the checks and publishes the version to npm through trusted publishing, with provenance.
