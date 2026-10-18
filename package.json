@@ -1,14 +1,17 @@
 {
   "name": "wobbree",
-  "version": "0.1.2",
-  "description": "A minimal library for managing Three.js objects: owners free what they create, and lists keep scene objects in step with your data.",
+  "version": "0.2.0",
+  "description": "A very light set of ideas for building games with Three.js: owners that free what they create, entities, lists, scenes, and a stage that draws them.",
   "keywords": [
     "three",
     "three.js",
     "threejs",
     "webgl",
+    "game",
+    "game-framework",
     "dispose",
-    "components"
+    "entities",
+    "scenes"
   ],
   "license": "MIT",
   "author": "dxu",

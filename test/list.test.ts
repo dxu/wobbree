@@ -33,7 +33,7 @@ function setup() {
 
 const shown = (parent: Group) => parent.children.map((child) => `${child.name}=${child.userData.value}`);
 
-test("builds one component per new key, adds its root to the parent and updates it", () => {
+test("builds one entity per new key, adds its root to the parent and updates it", () => {
   const { parent, list, log } = setup();
 
   list.update([
@@ -45,7 +45,7 @@ test("builds one component per new key, adds its root to the parent and updates 
   assert.deepEqual(shown(parent), ["a=1", "b=2"]);
 });
 
-test("updates existing components without building them again", () => {
+test("updates existing entities without building them again", () => {
   const { parent, list, log } = setup();
 
   list.update([{ id: "a", value: 1 }]);
@@ -55,7 +55,7 @@ test("updates existing components without building them again", () => {
   assert.deepEqual(shown(parent), ["a=5"]);
 });
 
-test("removes and frees the components whose keys are gone", () => {
+test("removes and frees the entities whose keys are gone", () => {
   const { parent, list, log } = setup();
 
   list.update([
@@ -68,7 +68,7 @@ test("removes and frees the components whose keys are gone", () => {
   assert.deepEqual(shown(parent), ["b=3"]);
 });
 
-test("items that share a key share one component, and missing keys are still removed", () => {
+test("items that share a key share one entity, and missing keys are still removed", () => {
   const { parent, list, log } = setup();
 
   list.update([
@@ -84,7 +84,7 @@ test("items that share a key share one component, and missing keys are still rem
   assert.deepEqual(shown(parent), ["a=4"]);
 });
 
-test("disposing the owner frees every component, and later updates do nothing", () => {
+test("disposing the owner frees every entity, and later updates do nothing", () => {
   const { owner, parent, list, log } = setup();
   list.update([
     { id: "a", value: 1 },

@@ -1,10 +1,10 @@
-import type { Object3D } from "three";
+import type { Camera, Object3D, Scene } from "three";
 
 /** Anything an owner can free: a Three.js object, or anything with a `dispose()` method. */
 export type Ownable = Object3D | { dispose(): void };
 
-/** A piece of a scene: its root object, and a way to bring it up to date with new state. */
-export interface Component<State> {
+/** A thing in a game: its root object, and a way to bring it up to date with new state. */
+export interface Entity<State> {
   readonly root: Object3D;
   update(state: State): void;
 }
@@ -50,11 +50,11 @@ export class Owner {
     return child;
   }
 
-  /** Keeps one component per item under `parent`, matched by `key`. See `List`. */
+  /** Keeps one entity per item under `parent`, matched by `key`. See `List`. */
   list<Item>(
     parent: Object3D,
     key: (item: Item) => unknown,
-    build: (owner: Owner, item: Item) => Component<Item>,
+    build: (owner: Owner, item: Item) => Entity<Item>,
   ): List<Item> {
     return new List(this, parent, key, build);
   }
@@ -110,22 +110,22 @@ function hasDispose(object: Object3D): object is Object3D & { dispose(): void } 
 interface ListEntry<Item> {
   readonly key: unknown;
   readonly owner: Owner;
-  readonly component: Component<Item>;
+  readonly entity: Entity<Item>;
   generation: number;
 }
 
 /**
- * One component per item, matched by key. Each `update(items)` builds a
- * component for every new key and adds its root to the parent, updates every
- * component with its item, and disposes the components whose keys are gone.
- * Keys must be unique; items that share a key share one component. Create one
- * with `owner.list()`: it is disposed, with all its components, with that owner.
+ * One entity per item, matched by key. Each `update(items)` builds an entity
+ * for every new key and adds its root to the parent, updates every entity with
+ * its item, and disposes the entities whose keys are gone. Keys must be unique;
+ * items that share a key share one entity. Create one with `owner.list()`: it
+ * is disposed, with all its entities, with that owner.
  */
 export class List<Item> {
   readonly #owner: Owner;
   readonly #parent: Object3D;
   readonly #key: (item: Item) => unknown;
-  readonly #build: (owner: Owner, item: Item) => Component<Item>;
+  readonly #build: (owner: Owner, item: Item) => Entity<Item>;
   readonly #entries = new Map<unknown, ListEntry<Item>>();
   #generation = 0;
 
@@ -133,7 +133,7 @@ export class List<Item> {
     owner: Owner,
     parent: Object3D,
     key: (item: Item) => unknown,
-    build: (owner: Owner, item: Item) => Component<Item>,
+    build: (owner: Owner, item: Item) => Entity<Item>,
   ) {
     this.#owner = owner;
     this.#parent = parent;
@@ -153,23 +153,23 @@ export class List<Item> {
         entry.generation = generation;
         kept++;
       }
-      entry.component.update(item);
+      entry.entity.update(item);
     }
     if (kept < this.#entries.size) this.#removeOlderThan(generation);
   }
 
   #add(key: unknown, item: Item): ListEntry<Item> {
     const owner = this.#owner.child();
-    let component: Component<Item>;
+    let entity: Entity<Item>;
     try {
-      component = this.#build(owner, item);
+      entity = this.#build(owner, item);
     } catch (error) {
       owner.dispose();
       throw error;
     }
-    owner.onDispose(() => component.root.removeFromParent());
-    this.#parent.add(component.root);
-    const entry: ListEntry<Item> = { key, owner, component, generation: 0 };
+    owner.onDispose(() => entity.root.removeFromParent());
+    this.#parent.add(entity.root);
+    const entry: ListEntry<Item> = { key, owner, entity, generation: 0 };
     this.#entries.set(key, entry);
     return entry;
   }
@@ -180,6 +180,114 @@ export class List<Item> {
         this.#entries.delete(entry.key);
         entry.owner.dispose();
       }
+    }
+  }
+}
+
+/** The canvas a stage draws on: its size in CSS px, and its device pixels per CSS px. */
+export interface Viewport {
+  readonly width: number;
+  readonly height: number;
+  readonly density: number;
+}
+
+/**
+ * One screen or layer of a game, such as a title screen, a match or a HUD: what it shows, the camera it is seen
+ * through, and how it lays itself out. A stage draws it.
+ */
+export interface GameScene {
+  /** What the scene shows. A Three.js scene, so a stage can draw it on its own. */
+  readonly root: Scene;
+  /** The camera the scene is seen through right now. A scene may keep several, and switch by changing this. */
+  readonly camera: Camera;
+  /** Lays the scene out for `viewport`. A stage calls it when the scene is shown and when the viewport changes. */
+  layOut(viewport: Viewport): void;
+}
+
+/** What a stage needs from a renderer. Three.js's `WebGLRenderer` has all of it. */
+export interface StageRenderer {
+  readonly domElement: HTMLCanvasElement;
+  autoClear: boolean;
+  setPixelRatio(density: number): void;
+  setSize(width: number, height: number, updateStyle?: boolean): void;
+  setAnimationLoop(callback: ((time: number) => void) | null): void;
+  clear(): void;
+  clearDepth(): void;
+  render(scene: Object3D, camera: Camera): void;
+}
+
+export interface StageOptions {
+  /**
+   * The most device pixels per CSS px the stage draws at. Each step up costs the square in pixels to fill, for less and
+   * less to see, so 2 by default.
+   */
+  readonly maxDensity?: number;
+}
+
+/**
+ * Draws a game's scenes on a renderer's canvas, a frame each time the display refreshes, in layers: each layer shows
+ * one scene, drawn through that scene's camera over the layers below. The page sets the canvas's size, with CSS; the
+ * stage draws at that size and the screen's pixel density, up to `maxDensity`, and has every scene lay itself out when
+ * they change. The stage only draws: whoever makes a scene frees it, through its owner.
+ */
+export class Stage {
+  readonly #renderer: StageRenderer;
+  readonly #maxDensity: number;
+  readonly #layers: { readonly layer: number; readonly scene: GameScene }[] = [];
+  #viewport: Viewport | undefined;
+
+  constructor(renderer: StageRenderer, { maxDensity = 2 }: StageOptions = {}) {
+    this.#renderer = renderer;
+    this.#maxDensity = maxDensity;
+    renderer.autoClear = false;
+    renderer.setAnimationLoop(() => this.#frame());
+  }
+
+  /** The viewport the stage last drew at, or `undefined` before its first frame. */
+  get viewport(): Viewport | undefined {
+    return this.#viewport;
+  }
+
+  /**
+   * Shows `scene` on `layer`, in place of the scene that layer showed; `undefined` empties the layer. Lower layers are
+   * drawn first. Once the stage has a viewport, a scene it's given is laid out at once.
+   */
+  show(layer: number, scene: GameScene | undefined): void {
+    const index = this.#layers.findIndex((shown) => shown.layer === layer);
+    if (index !== -1) this.#layers.splice(index, 1);
+    if (scene === undefined) return;
+    const above = this.#layers.findIndex((shown) => shown.layer > layer);
+    this.#layers.splice(above === -1 ? this.#layers.length : above, 0, { layer, scene });
+    if (this.#viewport !== undefined) scene.layOut(this.#viewport);
+  }
+
+  /** Stops drawing. Owning the stage stops it with its owner. */
+  dispose(): void {
+    this.#renderer.setAnimationLoop(null);
+    this.#layers.length = 0;
+  }
+
+  #frame(): void {
+    const renderer = this.#renderer;
+    const { clientWidth: width, clientHeight: height } = renderer.domElement;
+    // A canvas the page hasn't given a size has nothing to draw on.
+    if (width === 0 || height === 0) return;
+    const density = Math.min(globalThis.devicePixelRatio, this.#maxDensity);
+    const last = this.#viewport;
+    if (last === undefined || width !== last.width || height !== last.height || density !== last.density) {
+      const viewport = { width, height, density };
+      this.#viewport = viewport;
+      renderer.setPixelRatio(density);
+      renderer.setSize(width, height, false);
+      for (const { scene } of this.#layers) scene.layOut(viewport);
+    }
+    renderer.clear();
+    const layers = this.#layers;
+    for (let index = 0; index < layers.length; index++) {
+      const shown = layers[index];
+      if (shown === undefined) continue;
+      if (index > 0) renderer.clearDepth();
+      renderer.render(shown.scene.root, shown.scene.camera);
     }
   }
 }

@@ -123,7 +123,7 @@ for (let round = 0; round < ROUNDS; round++) {
 }
 
 // Did the work happen? The last positions were written, and the churned list
-// built and freed one component per replaced item and still shows ITEMS.
+// built and freed one entity per replaced item and still shows ITEMS.
 const lastX = UPDATES - 1;
 const listWrote = listed.children.every((child) => child.position.x === lastX);
 const handWrote = pairs.every(({ mesh }) => mesh.position.x === lastX);
