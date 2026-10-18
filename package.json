@@ -1,6 +1,6 @@
 {
   "name": "wobbree",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A minimal library for managing Three.js objects: owners free what they create, and lists keep scene objects in step with your data.",
   "keywords": [
     "three",
