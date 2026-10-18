@@ -26,7 +26,7 @@ function that applies new state.
 import { BoxGeometry, Mesh, MeshNormalMaterial, Scene } from "three";
 import { Owner, type Component } from "wobbree";
 
-function cube(owner: Owner, size: number): Component<{ angle: number }> {
+function Cube(owner: Owner, size: number): Component<{ angle: number }> {
   const geometry = owner.own(new BoxGeometry(size, size, size));
   const material = owner.own(new MeshNormalMaterial());
   const mesh = owner.own(new Mesh(geometry, material));
@@ -40,7 +40,7 @@ function cube(owner: Owner, size: number): Component<{ angle: number }> {
 
 const scene = new Scene();
 const app = new Owner();
-const box = cube(app, 1);
+const box = Cube(app, 1);
 scene.add(box.root);
 box.update({ angle: 0.5 });
 
@@ -122,6 +122,24 @@ const spin = (seconds: number) => {
 frames.add(spin); // `frames` is your own Set, run by your animation loop
 owner.onDispose(() => frames.delete(spin));
 ```
+
+## Suggested standards
+
+wobbree doesn't enforce these, but they keep a codebase of components easy to find your way around: every component
+file is laid out the same way, so you always know where to look.
+
+- **One component per file, named after it, ending in `.component.ts`.** `Cube.component.ts` holds `Cube`. A
+  component's name is capitalized like a class's, so the ending is what tells a component's file apart from a class's,
+  or from a plain module of functions and values.
+- **The component comes first,** right after the imports. Its types and defaults follow, then the file's private
+  constants and helpers, in the order the component uses them. A function can be called before its declaration, and
+  the constants are read only when the component runs, so this order works.
+- **What it is goes in its arguments; what changes goes through `update`.** Arguments are fixed when the component is
+  built, like a cube's size. `update` carries what changes while it's shown, like its angle, and the component does
+  costly work only when a value that work depends on has changed.
+- **Helpers only one file uses stay in that file, unexported,** so nothing else comes to depend on them. A file of its
+  own means shared code.
+- **Fixed values are named in capitals,** so they read as fixed wherever they're used.
 
 ## API
 
