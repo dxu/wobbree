@@ -20,7 +20,7 @@ how a game works. Its value is being small, fast and easy to read; every change 
 
 Every change reaches `main` through a pull request the user has read and approved.
 
-1. **Branch** from `origin/main`, in a git worktree of your own if another session is working in this folder.
+1. **Branch** from `origin/main`.
 2. **Push as you go and open a draft:** push first with `git push -u origin HEAD`, then run `gh pr create --draft`, so
    the user can follow the work. The repository is public, so check each push and the pull request's text for anything
    specific to one game.
