@@ -192,6 +192,11 @@ same way, so you always know where to look.
   module of functions and values.
 - **One scene per file, ending in `.scene.ts`, holding the scene's name with "Scene" after it.** `Title.scene.ts` holds
   `TitleScene`.
+- **An entity's shaders sit beside it, in a file named after it, ending in `.glsl.ts`.** `Cube.glsl.ts` holds the GLSL
+  that `Cube.entity.ts` gives its material, as strings named in capitals, such as `CUBE_FRAGMENT`. Shader code is a
+  language of its own, so it gets a file of its own even though only the entity uses it. GLSL functions that several
+  shaders share go in `.glsl.ts` files of their own, wherever the game keeps them, each exporting its functions as a
+  string, such as `EDGES`, which a shader splices in before its own code: `${EDGES}`.
 - **The entity or scene comes first,** right after the imports. Its types and defaults follow, then the file's private
   constants and helpers, in the order it uses them. A function can be called before its declaration, and the
   constants are read only when it runs, so this order works.
