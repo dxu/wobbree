@@ -192,14 +192,21 @@ same way, so you always know where to look.
   module of functions and values.
 - **One scene per file, ending in `.scene.ts`, holding the scene's name with "Scene" after it.** `Title.scene.ts` holds
   `TitleScene`.
+- **An entity's shaders sit beside it, in a file named after it, ending in `.glsl.ts`.** Shaders are the small programs,
+  written in GLSL, that run on the graphics card. `Cube.glsl.ts` holds the ones `Cube.entity.ts` hands its
+  `ShaderMaterial`, as strings named in capitals, such as `CUBE_VERTEX` and `CUBE_FRAGMENT`: a language of its own
+  reads best in a file of its own, even though only the entity uses it. GLSL functions that more than one entity's
+  shaders use go in `.glsl.ts` files of their own, wherever the game keeps them, each exported as a string, such as
+  `EDGES`. GLSL has no imports, so a shader pastes in each one it uses before its own code, as `${EDGES}` in its
+  template string. None pastes in another, so no function is defined twice.
 - **The entity or scene comes first,** right after the imports. Its types and defaults follow, then the file's private
   constants and helpers, in the order it uses them. A function can be called before its declaration, and the
   constants are read only when it runs, so this order works.
 - **What it is goes in its arguments; what changes goes through `update`.** Arguments are fixed when an entity is
   built, like a cube's size. `update` carries what changes while it's shown, like its angle, and the entity does
   costly work only when a value that work depends on has changed.
-- **Helpers only one file uses stay in that file, unexported,** so nothing else comes to depend on them. A file of its
-  own means shared code.
+- **Helpers only one file uses stay in that file, unexported,** so nothing else comes to depend on them. Apart from an
+  entity's shaders, a file of its own means shared code.
 - **Fixed values are named in capitals,** so they read as fixed wherever they're used.
 
 ## API
