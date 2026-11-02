@@ -10,8 +10,10 @@ how your game works to you.
 - A **game scene** is one screen or layer of your game: what it shows, the camera it's seen through, and how it lays
   itself out.
 - A **stage** draws your scenes on a canvas every frame, in layers, at the canvas's size and the screen's pixel density.
+- A **batch** draws many copies of a shape in one draw call, each with values of its own, in the order you paint them.
 
-It is one small file with no dependencies besides Three.js, and it imports only Three.js's types.
+It has no dependencies besides Three.js. Its core is one small file that imports only Three.js's types, and the batch
+is a second, imported on its own from `wobbree/batch`.
 
 ```sh
 npm install wobbree three
@@ -182,6 +184,43 @@ stage.show(1, TitleScene(app.child()));
   title.dispose(); // frees everything the title made
   ```
 
+## Batches
+
+Every mesh is a draw call, and every draw call passes through Three.js, the browser and the graphics driver, so a few
+thousand of them fill a frame however simple each one is. A batch draws everything in it in one call: one shape, repeated,
+with a list of what's different about each copy.
+
+Name the values each copy has, and read them in your shader as attributes of those names. Then add copies and set them:
+
+```ts
+import { ShaderMaterial } from "three";
+import { Batch } from "wobbree/batch";
+
+const material = new ShaderMaterial({ vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false });
+const sprites = new Batch(owner, { material, fields: { position: 2, size: 1, tint: 3 } });
+scene.add(sprites.mesh);
+
+const coin = sprites.add(owner, 1);
+const { position, tint } = coin.fields;
+position.set(10, 20);
+tint.set(1, 0.8, 0.2);
+coin.visible = false;
+
+sprites.flush(); // each frame, before the batch is drawn
+```
+
+`flush` copies the list to the GPU only when something in it changed, so what holds still costs nothing.
+
+- **Copies paint in order.** A run paints over the runs before it. Set `order`, such as from how far away each one stands,
+  and they sort: drawn things with soft edges have to be painted back to front.
+- **Runs group copies.** `add(owner, count)` adds a run of `count` copies, and `setAt(index, ...)` sets a copy past the
+  first. Values given as `shared` are the same for every copy of a run, and held once, so a line of letters moves by
+  setting one value. For a run of many copies, writing to `values` and calling `changed` is faster than setting each one.
+- **Any shape.** A batch draws a flat square, corners from -1 to 1, unless you give it a `shape`. Every copy draws all of
+  it, so copies of different sizes of detail share the finest one.
+- **One material.** A batch draws with one material, so what differs goes in its fields. A texture array lets one
+  material read many pictures: put which one in a field.
+
 ## Suggested standards
 
 wobbree doesn't enforce these, but they keep a game's code easy to find your way around: every file is laid out the
@@ -260,6 +299,26 @@ density, 2 by default.
 | `viewport` | The viewport the stage last drew at, or `undefined` before its first frame. |
 | `dispose()` | Stops drawing. Owning the stage stops it with its owner. |
 
+### `new Batch(owner, options)`
+
+From `wobbree/batch`. Takes `material`, `fields`, and optionally `shared` and `shape`, each described under Batches.
+
+| | |
+| --- | --- |
+| `mesh` | The one object that draws everything. Add it to a scene. |
+| `add(owner, count)` | Adds a run of `count` copies, until `owner` is freed. |
+| `flush()` | Copies what changed to the GPU. Call it each frame before the batch is drawn. |
+
+### `BatchRun`
+
+| | |
+| --- | --- |
+| `fields` | Each value by name, as a `BatchField`, with `set(a, b?, c?, d?)` for the first copy and `setAt(index, a, b?, c?, d?)` for any. |
+| `order` | Where it paints: over lower orders, and over runs of its own order added before it. |
+| `visible` | Whether it's drawn. Hidden, it isn't copied to the GPU. |
+| `values`, `shared`, `changed()` | The numbers themselves, for writing many at once. Call `changed` after. |
+| `count`, `resize(count)` | How many copies it has. Resizing keeps its place. |
+
 ## Performance
 
 Measured with `npm run bench`: 1,000 meshes, 500 updates per round, 7 rounds with the sides taking turns, on an Apple
@@ -282,15 +341,15 @@ What costs more than the library:
 
 - **Creating objects every frame.** Write properties in `update` and in your per-frame work; creating objects there
   makes the garbage collector pause, which shows up as stutter.
-- **Draw calls.** Each mesh is drawn separately. For many similar objects, one `InstancedMesh` is far cheaper than many
-  meshes.
+- **Draw calls.** Each mesh is drawn separately. For many similar objects, one batch is far cheaper than many meshes.
 - **Pixel density.** Each step up in density is the square in pixels to fill. That's why the stage caps it.
 
 ## Design
 
-- One file, [`src/index.ts`](src/index.ts), short enough to read in one sitting.
-- Three.js is only a type import: wobbree checks `isObject3D` instead of importing Three.js, and your app makes the
-  renderer and hands it to the stage, so wobbree can never load a second copy of Three.js into your app.
+- Two files, [`src/index.ts`](src/index.ts) and [`src/batch.ts`](src/batch.ts), short enough to read in one sitting.
+- In the core, Three.js is only a type import: wobbree checks `isObject3D` instead of importing Three.js, and your app
+  makes the renderer and hands it to the stage. A batch has to make Three.js objects, so `wobbree/batch` imports Three.js
+  as a peer dependency, your app's own copy.
 - Freeing is explicit. Nothing is disposed unless an owner owns it, and the stage frees nothing it draws.
 - Only what every game needs. Your camera, your layout and your look stay in your game.
 
