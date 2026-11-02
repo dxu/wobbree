@@ -208,8 +208,11 @@ same way, so you always know where to look.
 - **What it is goes in its arguments; what changes goes through `update`.** Arguments are fixed when an entity is
   built, like a cube's size. `update` carries what changes while it's shown, like its angle, and the entity does
   costly work only when a value that work depends on has changed.
-- **Helpers only one file uses stay in that file, unexported,** so nothing else comes to depend on them. Apart from an
-  entity's shaders and the game's data files, a file of its own means shared code.
+- **Code goes where its meaning belongs, however many files use it today.** A concept of its own, like a rectangle or a
+  spring's formula, gets a shared home even with one user, so the next feature finds it instead of writing a second
+  copy. Moving it adds no options or layers, and its home is named for its subject, never `utils`. What only means
+  something inside one feature, such as its numbers, stays with that feature. One subject is one file, in clear
+  sections, and length alone is no reason to split it.
 - **Fixed values are named in capitals,** so they read as fixed wherever they're used.
 
 ## API
