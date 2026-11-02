@@ -1,8 +1,8 @@
 # Working on wobbree
 
 wobbree is a very light set of ideas for building games with Three.js: the few pieces every game needs (owners,
-entities, lists, scenes and a stage) and light rules for performance and for shaping abstractions, without prescribing
-how a game works. Its value is being small, fast and easy to read; every change protects all three.
+entities, lists, scenes, a stage and batches) and light rules for performance and for shaping abstractions, without
+prescribing how a game works. Its value is being small, fast and easy to read; every change protects all three.
 
 - The library is `src/index.ts`, short enough to read in one sitting, and `src/batch.ts`, which an app imports on its own
   from `wobbree/batch`. A piece belongs in it only when every Three.js game needs it; what one game chooses, such as its

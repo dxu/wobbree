@@ -38,7 +38,7 @@
   ],
   "sideEffects": false,
   "peerDependencies": {
-    "three": ">=0.150.0"
+    "three": ">=0.159.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

@@ -190,19 +190,21 @@ Every mesh is a draw call, and every draw call passes through Three.js, the brow
 thousand of them fill a frame however simple each one is. A batch draws everything in it in one call: one shape, repeated,
 with a list of what's different about each copy.
 
-Name the values each copy has, and read them in your shader as attributes of those names. Then add copies and set them:
+Name the values each copy has, and read them in your shader as attributes of those names. The shape's own attributes
+keep their names, so `position` is taken: it's the corners of the shape, and a batch throws if a value uses it. Then add
+copies and set them:
 
 ```ts
 import { ShaderMaterial } from "three";
 import { Batch } from "wobbree/batch";
 
 const material = new ShaderMaterial({ vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false });
-const sprites = new Batch(owner, { material, fields: { position: 2, size: 1, tint: 3 } });
+const sprites = new Batch(owner, { material, fields: { place: 2, size: 1, tint: 3 } });
 scene.add(sprites.mesh);
 
 const coin = sprites.add(owner, 1);
-const { position, tint } = coin.fields;
-position.set(10, 20);
+const { place, tint } = coin.fields;
+place.set(10, 20);
 tint.set(1, 0.8, 0.2);
 coin.visible = false;
 
@@ -215,7 +217,8 @@ sprites.flush(); // each frame, before the batch is drawn
   and they sort: drawn things with soft edges have to be painted back to front.
 - **Runs group copies.** `add(owner, count)` adds a run of `count` copies, and `setAt(index, ...)` sets a copy past the
   first. Values given as `shared` are the same for every copy of a run, and held once, so a line of letters moves by
-  setting one value. For a run of many copies, writing to `values` and calling `changed` is faster than setting each one.
+  setting one value. A run hides whole, so what hides on its own needs a run of its own. For a run of many copies, writing
+  to `values` and calling `changed` is faster than setting each one.
 - **Any shape.** A batch draws a flat square, corners from -1 to 1, unless you give it a `shape`. Every copy draws all of
   it, so copies of different sizes of detail share the finest one.
 - **One material.** A batch draws with one material, so what differs goes in its fields. A texture array lets one
@@ -307,7 +310,7 @@ From `wobbree/batch`. Takes `material`, `fields`, and optionally `shared` and `s
 | --- | --- |
 | `mesh` | The one object that draws everything. Add it to a scene. |
 | `add(owner, count)` | Adds a run of `count` copies, until `owner` is freed. |
-| `flush()` | Copies what changed to the GPU. Call it each frame before the batch is drawn. |
+| `flush()` | If anything changed, copies every shown run to the GPU. Call it each frame before the batch is drawn. |
 
 ### `BatchRun`
 

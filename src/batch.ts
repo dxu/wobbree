@@ -1,6 +1,6 @@
 import {
   BufferAttribute,
-  type BufferGeometry,
+  BufferGeometry,
   DynamicDrawUsage,
   InstancedBufferGeometry,
   InstancedInterleavedBuffer,
@@ -10,11 +10,11 @@ import {
 } from "three";
 import type { Owner } from "./index.ts";
 
-/** How a batch's instances are laid out: each value's name, as its material's shader reads it, and how many numbers it has, 1 to 4. */
-export type BatchFields = Readonly<Record<string, number>>;
+/** Named values, each with how many numbers it has, 1 to 4. A shader reads each as an attribute of that name. */
+export type FieldSizes = Readonly<Record<string, number>>;
 
-export interface BatchOptions<Fields extends BatchFields, Shared extends BatchFields> {
-  /** The material every instance is drawn with. It reads `fields` and `shared` as attributes of those names. */
+export interface BatchOptions<Fields extends FieldSizes, Shared extends FieldSizes> {
+  /** The material every instance is drawn with. */
   readonly material: Material;
   /** The values each instance has of its own, which a run holds in `values`. */
   readonly fields: Fields;
@@ -27,19 +27,16 @@ export interface BatchOptions<Fields extends BatchFields, Shared extends BatchFi
 /**
  * Draws many copies of a shape in a single draw call, each copy an instance with values of its own that its material's
  * shader reads. Whoever draws adds runs of instances and writes their values, and before each frame is drawn, `flush`
- * copies every run that's shown into one buffer on the GPU. A run paints over the runs before it, in the order of
+ * copies every shown run into one buffer on the GPU. A run paints over the runs before it, in the order of
  * `BatchRun.order`, then the order they were added. When nothing has changed, `flush` copies nothing. A batch with
  * nothing in it isn't drawn, except on its first frame, which sets it up: Three.js then compiles its material and sends
  * its buffers to the GPU without drawing anything, rather than on the frame its first instance shows.
  */
-export class Batch<Fields extends BatchFields = BatchFields, Shared extends BatchFields = Record<never, number>> {
+export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes = Record<never, number>> {
   /** The one object that draws every instance. Add it to a scene. Its instances are never left out as off screen. */
   readonly mesh: Mesh<InstancedBufferGeometry, Material>;
   readonly #shape: BufferGeometry;
-  readonly #fields: readonly (readonly [string, number])[];
-  readonly #places: readonly FieldPlace[];
-  readonly #own: number;
-  readonly #shared: number;
+  readonly #layout: Layout;
   readonly #runs: BatchRun<Fields, Shared>[] = [];
   #capacity = 0;
   #values = new Float32Array(0);
@@ -50,35 +47,8 @@ export class Batch<Fields extends BatchFields = BatchFields, Shared extends Batc
   #unsorted = false;
   #first = true;
   #added = 0;
-
-  constructor(owner: Owner, { material, fields, shared, shape = square() }: BatchOptions<Fields, Shared>) {
-    const alike: BatchFields = shared ?? {};
-    this.#shape = owner.own(shape);
-    this.#fields = [...Object.entries(alike), ...Object.entries(fields)];
-    this.#places = [...placesOf(alike, true), ...placesOf(fields, false)];
-    this.#shared = total(alike);
-    this.#own = total(fields);
-    this.mesh = owner.own(new Mesh(this.#geometry(INITIAL_CAPACITY), owner.own(material)));
-    // The shape's bounds say nothing about where its instances are.
-    this.mesh.frustumCulled = false;
-    owner.onDispose(() => this.mesh.geometry.dispose());
-  }
-
-  /** Adds `count` instances, painted over every run before them, until `owner` is freed. */
-  add(owner: Owner, count: number): BatchRun<Fields, Shared> {
-    const run = new BatchRun<Fields, Shared>(this.#notes, this.#places, count, this.#own, this.#shared, this.#added++);
-    this.#runs.push(run);
-    this.#changed = true;
-    this.#unsorted = true;
-    owner.onDispose(() => {
-      this.#runs.splice(this.#runs.indexOf(run), 1);
-      this.#changed = true;
-    });
-    return run;
-  }
-
   /** How a run tells the batch what `flush` has to do. */
-  readonly #notes: BatchNotes = {
+  readonly #listener: RunListener = {
     changed: () => {
       this.#changed = true;
     },
@@ -88,7 +58,28 @@ export class Batch<Fields extends BatchFields = BatchFields, Shared extends Batc
     },
   };
 
-  /** Copies the runs to the GPU if anything changed since the last time. Call it each frame before the batch is drawn. */
+  constructor(owner: Owner, { material, fields, shared, shape = square() }: BatchOptions<Fields, Shared>) {
+    this.#shape = owner.own(shape);
+    this.#layout = layoutOf(fields, shared ?? {}, shape);
+    this.mesh = owner.own(new Mesh(this.#geometry(INITIAL_CAPACITY), owner.own(material)));
+    // The shape's bounds say nothing about where its instances are.
+    this.mesh.frustumCulled = false;
+    owner.onDispose(() => this.mesh.geometry.dispose());
+  }
+
+  /** Adds `count` instances, painted over every run before them, until `owner` is freed. */
+  add(owner: Owner, count: number): BatchRun<Fields, Shared> {
+    const run = new BatchRun<Fields, Shared>(this.#listener, this.#layout, count, this.#added++);
+    this.#runs.push(run);
+    this.#listener.moved();
+    owner.onDispose(() => {
+      this.#runs.splice(this.#runs.indexOf(run), 1);
+      this.#listener.changed();
+    });
+    return run;
+  }
+
+  /** If anything changed, copies every shown run to the GPU. Call it each frame before the batch is drawn. */
   flush(): void {
     const runs = this.#runs;
     let count = 0;
@@ -101,18 +92,17 @@ export class Batch<Fields extends BatchFields = BatchFields, Shared extends Batc
     this.#first = false;
     if (!this.#changed) return;
     if (this.#unsorted) {
-      runs.sort(paintOrder);
+      sortIntoPaintOrder(runs);
       this.#unsorted = false;
     }
     if (count > this.#capacity) {
       this.mesh.geometry.dispose();
       this.mesh.geometry = this.#geometry(Math.max(count, this.#capacity * 2));
     }
-    const stride = this.#shared + this.#own;
     let at = 0;
     for (let index = 0; index < runs.length; index++) {
       const run = runs[index] as BatchRun<Fields, Shared>;
-      if (run.visible) at = run.write(this.#values, at, stride);
+      if (run.visible) at = this.#write(run, at);
     }
     const buffer = this.#buffer;
     // With nothing shown there's nothing to copy; a range of nothing would make WebGL copy the whole buffer.
@@ -127,20 +117,35 @@ export class Batch<Fields extends BatchFields = BatchFields, Shared extends Batc
     this.#changed = false;
   }
 
+  /** Writes `run`'s instances into the buffer from value `at`. Returns where it ended. */
+  #write(run: BatchRun<Fields, Shared>, at: number): number {
+    const { sharedSize, ownSize } = this.#layout;
+    const target = this.#values;
+    const { shared, values, count } = run;
+    const stride = sharedSize + ownSize;
+    // Copied value by value: a view of `values` would be a new object for each instance, each frame something moves.
+    for (let index = 0; index < count; index++) {
+      const start = at + index * stride;
+      for (let value = 0; value < sharedSize; value++) target[start + value] = shared[value] ?? 0;
+      const from = index * ownSize;
+      for (let value = 0; value < ownSize; value++) target[start + sharedSize + value] = values[from + value] ?? 0;
+    }
+    return at + count * stride;
+  }
+
   /** The shape, with room for `capacity` instances. */
   #geometry(capacity: number): InstancedBufferGeometry {
     this.#capacity = capacity;
-    const stride = this.#shared + this.#own;
+    const { places, sharedSize, ownSize } = this.#layout;
+    const stride = sharedSize + ownSize;
     this.#values = new Float32Array(capacity * stride);
     const buffer = new InstancedInterleavedBuffer(this.#values, stride).setUsage(DynamicDrawUsage);
     this.#buffer = buffer;
     const geometry = new InstancedBufferGeometry();
     for (const [name, attribute] of Object.entries(this.#shape.attributes)) geometry.setAttribute(name, attribute);
     geometry.setIndex(this.#shape.getIndex());
-    let offset = 0;
-    for (const [name, size] of this.#fields) {
-      geometry.setAttribute(name, new InterleavedBufferAttribute(buffer, size, offset));
-      offset += size;
+    for (const { name, size, shared, offset } of places) {
+      geometry.setAttribute(name, new InterleavedBufferAttribute(buffer, size, shared ? offset : sharedSize + offset));
     }
     geometry.instanceCount = 0;
     return geometry;
@@ -148,39 +153,37 @@ export class Batch<Fields extends BatchFields = BatchFields, Shared extends Batc
 }
 
 /**
- * A run of instances in a `Batch`. Its `fields` set its values by name: `run.fields.position.set(10, 20)`. Code that writes
- * many at once can write its instances' fields straight into `values`, one instance after another, and what they all have
+ * A run of instances in a `Batch`. Its `fields` set its values by name: `run.fields.place.set(10, 20)`. Code that writes
+ * many at once can write its instances' values straight into `values`, one instance after another, and what they all have
  * alike into `shared`, then call `changed`.
  */
-export class BatchRun<Fields extends BatchFields = BatchFields, Shared extends BatchFields = Record<never, number>> {
+export class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes = Record<never, number>> {
   /** The values every instance of the run has alike. */
   readonly shared: Float32Array;
-  readonly #notes: BatchNotes;
-  readonly #places: readonly FieldPlace[];
-  /** How many values each instance has of its own. */
-  readonly #fields: number;
-  /** When it was added, which settles the order of runs of the same `order`. */
-  readonly #added: number;
+  /** When it was added, among its batch's runs, which settles the order of runs of the same `order`. */
+  readonly added: number;
+  readonly #listener: RunListener;
+  readonly #layout: Layout;
   #count: number;
   #values: Float32Array;
   #order = 0;
   #visible = true;
-  #named: Readonly<Record<keyof Fields | keyof Shared, BatchField>> | undefined;
+  #fields: Readonly<Record<keyof Fields | keyof Shared, BatchField>> | undefined;
 
-  constructor(notes: BatchNotes, places: readonly FieldPlace[], count: number, fields: number, shared: number, added: number) {
-    this.#notes = notes;
-    this.#places = places;
+  constructor(listener: RunListener, layout: Layout, count: number, added: number) {
+    this.#listener = listener;
+    this.#layout = layout;
     this.#count = count;
-    this.#fields = fields;
-    this.#added = added;
-    this.#values = new Float32Array(count * fields);
-    this.shared = new Float32Array(shared);
+    this.added = added;
+    this.#values = new Float32Array(count * layout.ownSize);
+    this.shared = new Float32Array(layout.sharedSize);
   }
 
   /** The run's values by name, made the first time they're asked for, so a run written through `values` holds none. */
   get fields(): Readonly<Record<keyof Fields | keyof Shared, BatchField>> {
-    this.#named ??= Object.fromEntries(this.#places.map((place) => [place.name, new BatchField(this, place, this.#fields)])) as Record<keyof Fields | keyof Shared, BatchField>;
-    return this.#named;
+    const { places, ownSize } = this.#layout;
+    this.#fields ??= Object.fromEntries(places.map((place) => [place.name, new BatchField(this, place, ownSize)])) as Record<keyof Fields | keyof Shared, BatchField>;
+    return this.#fields;
   }
 
   /** How many instances the run has. */
@@ -188,10 +191,7 @@ export class BatchRun<Fields extends BatchFields = BatchFields, Shared extends B
     return this.#count;
   }
 
-  /**
-   * The run's instances' own fields: `count` instances, each the batch's `fields` in order, then any room it keeps for
-   * growing back into.
-   */
+  /** The run's instances' own values: `count` instances, then any room it keeps for growing back into. */
   get values(): Float32Array {
     return this.#values;
   }
@@ -204,12 +204,7 @@ export class BatchRun<Fields extends BatchFields = BatchFields, Shared extends B
   set order(order: number) {
     if (order === this.#order) return;
     this.#order = order;
-    this.#notes.moved();
-  }
-
-  /** When it was added, for sorting runs of one order. */
-  get added(): number {
-    return this.#added;
+    this.#listener.moved();
   }
 
   /** Whether the run is drawn at all. */
@@ -220,7 +215,7 @@ export class BatchRun<Fields extends BatchFields = BatchFields, Shared extends B
   set visible(visible: boolean) {
     if (visible === this.#visible) return;
     this.#visible = visible;
-    this.#notes.changed();
+    this.#listener.changed();
   }
 
   /**
@@ -229,53 +224,38 @@ export class BatchRun<Fields extends BatchFields = BatchFields, Shared extends B
    */
   resize(count: number): void {
     if (count === this.#count) return;
-    const fields = this.#fields;
-    if (count * fields > this.#values.length) {
-      const values = new Float32Array(count * fields);
-      values.set(this.#values.subarray(0, this.#count * fields));
+    const { ownSize } = this.#layout;
+    if (count * ownSize > this.#values.length) {
+      const values = new Float32Array(count * ownSize);
+      values.set(this.#values.subarray(0, this.#count * ownSize));
       this.#values = values;
     } else if (count > this.#count) {
-      this.#values.fill(0, this.#count * fields, count * fields);
+      this.#values.fill(0, this.#count * ownSize, count * ownSize);
     }
     this.#count = count;
-    this.#notes.changed();
+    this.#listener.changed();
   }
 
   /** Says `values` or `shared` changed, so the batch copies them before the next frame. */
   changed(): void {
-    this.#notes.changed();
-  }
-
-  /** Writes the run's instances into `target` from value `at`, `stride` values each. Returns where it ended. */
-  write(target: Float32Array, at: number, stride: number): number {
-    const shared = this.shared;
-    const values = this.#values;
-    const size = shared.length;
-    const fields = this.#fields;
-    // Copied value by value: a view of `values` would be a new object for each instance, each frame something moves.
-    for (let index = 0; index < this.#count; index++) {
-      const start = at + index * stride;
-      for (let value = 0; value < size; value++) target[start + value] = shared[value] ?? 0;
-      const from = index * fields;
-      for (let field = 0; field < fields; field++) target[start + size + field] = values[from + field] ?? 0;
-    }
-    return at + this.#count * stride;
+    this.#listener.changed();
   }
 }
 
 /**
- * One named value of a run, set with up to four numbers: `position.set(10, 20)`, or `position.setAt(3, 10, 20)` for an
- * instance past the first. A value every instance shares has one place, whichever instance it's asked for.
+ * One named value of a run, set with up to four numbers: `place.set(10, 20)`, or `place.setAt(3, 10, 20)` for an instance
+ * past the first. A value every instance shares has one place, whichever instance it's asked for.
  */
 export class BatchField {
   readonly #run: Pick<BatchRun, "values" | "shared" | "changed">;
   readonly #place: FieldPlace;
-  readonly #stride: number;
+  /** How many values each instance of the run has of its own. */
+  readonly #ownSize: number;
 
-  constructor(run: Pick<BatchRun, "values" | "shared" | "changed">, place: FieldPlace, stride: number) {
+  constructor(run: Pick<BatchRun, "values" | "shared" | "changed">, place: FieldPlace, ownSize: number) {
     this.#run = run;
     this.#place = place;
-    this.#stride = stride;
+    this.#ownSize = ownSize;
   }
 
   /** Sets the value of the run's first instance, or of all of them if it's shared. */
@@ -287,7 +267,7 @@ export class BatchField {
   setAt(index: number, a: number, b = 0, c = 0, d = 0): void {
     const { offset, size, shared } = this.#place;
     const values = shared ? this.#run.shared : this.#run.values;
-    const at = shared ? offset : index * this.#stride + offset;
+    const at = shared ? offset : index * this.#ownSize + offset;
     values[at] = a;
     if (size > 1) values[at + 1] = b;
     if (size > 2) values[at + 2] = c;
@@ -299,40 +279,63 @@ export class BatchField {
 /** Where a named value sits: in a run's `shared` or its instances' own `values`, how far in, and how many numbers it has. */
 interface FieldPlace {
   readonly name: string;
-  readonly offset: number;
   readonly size: number;
   readonly shared: boolean;
+  readonly offset: number;
+}
+
+/** Where a batch's values sit, and how many numbers each instance shares with its run and has of its own. */
+interface Layout {
+  readonly places: readonly FieldPlace[];
+  readonly sharedSize: number;
+  readonly ownSize: number;
 }
 
 /** What a run tells its batch: that something in it changed, or that it paints in a new place. */
-interface BatchNotes {
+interface RunListener {
   changed(): void;
   moved(): void;
 }
 
-/** Where each of `fields` sits, in order. */
-function placesOf(fields: BatchFields, shared: boolean): FieldPlace[] {
-  let offset = 0;
-  return Object.entries(fields).map(([name, size]) => {
-    const place = { name, offset, size, shared };
-    offset += size;
-    return place;
-  });
+/** The layout of `fields` and `shared`, which can't reuse a name, or a name `shape` already has, such as `position`. */
+function layoutOf(fields: FieldSizes, shared: FieldSizes, shape: BufferGeometry): Layout {
+  const places: FieldPlace[] = [];
+  const sizes = { own: 0, shared: 0 };
+  const place = (group: FieldSizes, isShared: boolean) => {
+    for (const [name, size] of Object.entries(group)) {
+      if (name in shape.attributes) throw new Error(`A batch's value can't be named ${name}: its shape has an attribute of that name.`);
+      if (places.some((each) => each.name === name)) throw new Error(`A batch has two values named ${name}.`);
+      if (!Number.isInteger(size) || size < 1 || size > 4) throw new Error(`A batch's value ${name} has ${size} numbers; a value has 1 to 4.`);
+      places.push({ name, size, shared: isShared, offset: isShared ? sizes.shared : sizes.own });
+      if (isShared) sizes.shared += size;
+      else sizes.own += size;
+    }
+  };
+  place(shared, true);
+  place(fields, false);
+  return { places, sharedSize: sizes.shared, ownSize: sizes.own };
 }
 
-/** How many numbers `fields` take. */
-function total(fields: BatchFields): number {
-  return Object.values(fields).reduce((sum, size) => sum + size, 0);
-}
-
-/** Runs in the order they paint. */
-function paintOrder(a: Pick<BatchRun, "order" | "added">, b: Pick<BatchRun, "order" | "added">): number {
-  return a.order - b.order || a.added - b.added;
+/**
+ * Puts `runs` in paint order, in place. Runs change places little from one frame to the next, so they're nearly in order,
+ * where an insertion sort takes one pass and, unlike `Array.sort`, makes no new objects.
+ */
+function sortIntoPaintOrder<Run extends Pick<BatchRun, "order" | "added">>(runs: Run[]): void {
+  for (let index = 1; index < runs.length; index++) {
+    const run = runs[index] as Run;
+    let at = index - 1;
+    for (; at >= 0; at--) {
+      const before = runs[at] as Run;
+      if (before.order < run.order || (before.order === run.order && before.added < run.added)) break;
+      runs[at + 1] = before;
+    }
+    runs[at + 1] = run;
+  }
 }
 
 /** A flat square with corners from -1 to 1. */
 function square(): BufferGeometry {
-  const geometry = new InstancedBufferGeometry();
+  const geometry = new BufferGeometry();
   geometry.setAttribute("position", new BufferAttribute(new Float32Array(SQUARE), 3));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   return geometry;

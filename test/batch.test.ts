@@ -52,6 +52,21 @@ test("a run's order decides what paints over what, and changing it repaints", ()
   assert.deepEqual(written(batch), [1, 1, 2, 2]);
 });
 
+test("runs of the same order paint in the order they were added, whatever came between", () => {
+  const owner = new Owner();
+  const batch = batchOf(owner);
+  const first = batch.add(owner, 1);
+  const second = batch.add(owner, 1);
+  fill(first.values, 1, 1);
+  fill(second.values, 2, 2);
+  second.order = -1;
+  batch.flush();
+  assert.deepEqual(written(batch), [2, 2, 1, 1]);
+  second.order = 0;
+  batch.flush();
+  assert.deepEqual(written(batch), [1, 1, 2, 2]);
+});
+
 test("shared values reach every instance of a run, before its own", () => {
   const owner = new Owner();
   const batch = batchOf(owner, { anchor: 1 });
@@ -64,17 +79,33 @@ test("shared values reach every instance of a run, before its own", () => {
 
 test("a run's values can be set by name", () => {
   const owner = new Owner();
-  const batch = new Batch(owner, { material: new RawShaderMaterial(), fields: { position: 2, tint: 1 }, shared: { lift: 1 } });
+  const batch = new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 2, tint: 1 }, shared: { lift: 1 } });
   const hand = batch.add(owner, 2);
-  const { position, tint, lift } = hand.fields;
-  position.set(10, 20);
-  position.setAt(1, 30, 40);
+  const { place, tint, lift } = hand.fields;
+  place.set(10, 20);
+  place.setAt(1, 30, 40);
   tint.setAt(1, 0.5);
   lift.set(7);
   batch.flush();
-  const attribute = batch.mesh.geometry.getAttribute("position") as InterleavedBufferAttribute;
-  assert.deepEqual([...attribute.data.array].slice(0, 8), [7, 10, 20, 0, 7, 30, 40, 0.5]);
-  assert.equal(hand.fields.position, position);
+  assert.deepEqual(written(batch), [7, 10, 20, 0, 7, 30, 40, 0.5]);
+  assert.equal(hand.fields.place, place);
+});
+
+test("a value can't take a name its shape's own attributes have", () => {
+  const owner = new Owner();
+  assert.throws(() => new Batch(owner, { material: new RawShaderMaterial(), fields: { position: 2 } }), /position/);
+  assert.throws(() => new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 2 }, shared: { position: 2 } }), /position/);
+});
+
+test("two values can't share a name", () => {
+  const owner = new Owner();
+  assert.throws(() => new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 2 }, shared: { place: 1 } }), /place/);
+});
+
+test("a value has 1 to 4 numbers", () => {
+  const owner = new Owner();
+  assert.throws(() => new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 5 } }), /place/);
+  assert.throws(() => new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 0 } }), /place/);
 });
 
 test("setting a value by name is noticed, and survives a resize", () => {
@@ -132,6 +163,19 @@ test("a batch grows past its first room, and keeps every instance", () => {
   batch.flush();
   assert.equal(batch.mesh.geometry.instanceCount, 1000);
   assert.equal(written(batch).every((value) => value === 7), true);
+});
+
+test("growing frees the geometry it outgrew, but not the shape", () => {
+  const owner = new Owner();
+  const log: string[] = [];
+  const shape = new BoxGeometry();
+  shape.addEventListener("dispose", () => log.push("shape"));
+  const batch = new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 2 }, shape });
+  batch.mesh.geometry.addEventListener("dispose", () => log.push("outgrown"));
+  batch.add(owner, 1000);
+  batch.flush();
+  assert.deepEqual(log, ["outgrown"]);
+  assert.equal(batch.mesh.geometry.getAttribute("position"), shape.getAttribute("position"));
 });
 
 test("resizing keeps what stays and starts what's new at 0", () => {
