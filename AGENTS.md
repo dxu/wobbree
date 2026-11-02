@@ -1,13 +1,15 @@
 # Working on wobbree
 
 wobbree is a very light set of ideas for building games with Three.js: the few pieces every game needs (owners,
-entities, lists, scenes and a stage) and light rules for performance and for shaping abstractions, without prescribing
-how a game works. Its value is being small, fast and easy to read; every change protects all three.
+entities, lists, scenes, a stage and batches) and light rules for performance and for shaping abstractions, without
+prescribing how a game works. Its value is being small, fast and easy to read; every change protects all three.
 
-- The library is one file, `src/index.ts`, short enough to read in one sitting. A piece belongs in it only when every
-  Three.js game needs it; what one game chooses, such as its camera, its layout or its look, stays in that game, as the
-  README's patterns show.
-- Three.js is a type import only, so the library never loads a second copy of Three.js into an app.
+- The library is `src/index.ts`, short enough to read in one sitting, and `src/batch.ts`, which an app imports on its own
+  from `wobbree/batch`. A piece belongs in it only when every Three.js game needs it; what one game chooses, such as its
+  camera, its layout or its look, stays in that game, as the README's patterns show.
+- In `src/index.ts`, Three.js is a type import only, so the library's core runs on anything shaped like Three.js and
+  loads none of it. `src/batch.ts` makes Three.js objects, so it imports Three.js as the peer dependency it is, which
+  shares the app's one copy.
 - Nothing that runs every frame or on every update, such as the stage's frame and `List.update`, creates objects.
 - Every behavior has a test that calls the public API and checks what a user can observe (`test/`, Node's test runner,
   real Three.js objects, and a stand-in renderer where Node has no WebGL).

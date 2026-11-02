@@ -26,6 +26,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./batch": {
+      "types": "./dist/batch.d.ts",
+      "default": "./dist/batch.js"
     }
   },
   "types": "./dist/index.d.ts",
@@ -34,7 +38,7 @@
   ],
   "sideEffects": false,
   "peerDependencies": {
-    "three": ">=0.150.0"
+    "three": ">=0.159.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -43,7 +47,7 @@
     "test": "node --test test/*.test.ts",
     "bench": "node bench/list.bench.ts",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
-    "prepack": "npm run build",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run check"
   },
   "devDependencies": {
