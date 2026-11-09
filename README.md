@@ -198,7 +198,7 @@ copies and set them:
 import { ShaderMaterial } from "three";
 import { Batch } from "wobbree/batch";
 
-const material = new ShaderMaterial({ vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false });
+const material = owner.own(new ShaderMaterial({ vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false }));
 const sprites = new Batch(owner, { material, fields: { place: 2, size: 1, tint: 3 } });
 scene.add(sprites.mesh);
 
@@ -208,21 +208,30 @@ place.set(10, 20);
 tint.set(1, 0.8, 0.2);
 coin.visible = false;
 
-sprites.flush(); // each frame, before the batch is drawn
+sprites.flush(); // once a frame, before renderer.render
 ```
 
-`flush` copies the list to the GPU only when something in it changed, so what holds still costs nothing.
+`flush` copies nothing in a frame where nothing changed. When anything did, it copies every shown copy, so one that moves
+costs as much as all of them moving.
 
+- **Flush before Three.js walks the scene:** before `renderer.render`, or from the scene's `onBeforeRender`. Three.js
+  sends the frame's buffers to the GPU while it walks the scene, so a flush from a mesh's `onBeforeRender` shows a frame
+  late.
 - **Copies paint in order.** A run paints over the runs before it. Set `order`, such as from how far away each one stands,
   and they sort: drawn things with soft edges have to be painted back to front.
 - **Runs group copies.** `add(owner, count)` adds a run of `count` copies, and `setAt(index, ...)` sets a copy past the
   first. Values given as `shared` are the same for every copy of a run, and held once, so a line of letters moves by
   setting one value. A run hides whole, so what hides on its own needs a run of its own. For a run of many copies, writing
   to `values` and calling `changed` is faster than setting each one.
-- **Any shape.** A batch draws a flat square, corners from -1 to 1, unless you give it a `shape`. Every copy draws all of
-  it, so copies of different sizes of detail share the finest one.
+- **Any shape.** A batch draws a flat square, corners from -1 to 1, unless you give it a `shape`. It draws a copy of the
+  shape's attributes, index and draw range, so yours stays as it was; morph targets aren't drawn. Every copy draws all
+  of it, so copies of different sizes of detail share the finest one.
+- **At most 16 attributes.** Each value is an attribute the shader reads, and so is each of the shape's, and WebGL 2
+  promises 16. A batch throws past that, so put small values together in one of up to 4 numbers.
 - **One material.** A batch draws with one material, so what differs goes in its fields. A texture array lets one
-  material read many pictures: put which one in a field.
+  material read many pictures: put which one in a field. The batch doesn't free the material, so own it as you own
+  anything you make. Copies paint in order only when it draws in one pass: Three.js draws a see-through material that
+  shows both sides twice, every back and then every front, so the batch throws unless `forceSinglePass` is on.
 
 ## Suggested standards
 
@@ -308,9 +317,9 @@ From `wobbree/batch`. Takes `material`, `fields`, and optionally `shared` and `s
 
 | | |
 | --- | --- |
-| `mesh` | The one object that draws everything. Add it to a scene. |
+| `mesh` | The one object that draws everything. Add it to a scene. Its geometry is replaced when the batch outgrows its room. |
 | `add(owner, count)` | Adds a run of `count` copies, until `owner` is freed. |
-| `flush()` | If anything changed, copies every shown run to the GPU. Call it each frame before the batch is drawn. |
+| `flush()` | If anything changed, copies every shown run to the GPU. Call it once a frame, before Three.js walks the scene. |
 
 ### `BatchRun`
 
@@ -344,7 +353,8 @@ What costs more than the library:
 
 - **Creating objects every frame.** Write properties in `update` and in your per-frame work; creating objects there
   makes the garbage collector pause, which shows up as stutter.
-- **Draw calls.** Each mesh is drawn separately. For many similar objects, one batch is far cheaper than many meshes.
+- **Draw calls.** Each mesh is drawn separately. For many copies of one mesh with Three.js's own materials, one
+  `InstancedMesh` is far cheaper than many meshes; for many things your own shader draws in an order you set, a batch is.
 - **Pixel density.** Each step up in density is the square in pixels to fill. That's why the stage caps it.
 
 ## Design

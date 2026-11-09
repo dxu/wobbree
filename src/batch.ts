@@ -1,6 +1,7 @@
 import {
   BufferAttribute,
   BufferGeometry,
+  DoubleSide,
   DynamicDrawUsage,
   InstancedBufferGeometry,
   InstancedInterleavedBuffer,
@@ -14,13 +15,19 @@ import type { Owner } from "./index.ts";
 export type FieldSizes = Readonly<Record<string, number>>;
 
 export interface BatchOptions<Fields extends FieldSizes, Shared extends FieldSizes> {
-  /** The material every instance is drawn with. */
+  /**
+   * The material every instance is drawn with. The batch doesn't free it: whoever made it owns it. It has to draw in one
+   * pass for runs to paint in order, so a see-through material drawn on both sides needs `forceSinglePass`.
+   */
   readonly material: Material;
   /** The values each instance has of its own, which a run holds in `values`. */
   readonly fields: Fields;
   /** The values every instance of a run has alike, which it holds once, in `shared`. They come first in each instance. */
   readonly shared?: Shared;
-  /** The geometry each instance draws: a flat square with corners from -1 to 1 unless it's given one. The batch owns it. */
+  /**
+   * The geometry each instance draws: a flat square with corners from -1 to 1 unless it's given one. The batch draws a
+   * copy, its attributes, index and draw range, so the one it's given stays as it was; its morph targets aren't drawn.
+   */
   readonly shape?: BufferGeometry;
 }
 
@@ -29,12 +36,16 @@ export interface BatchOptions<Fields extends FieldSizes, Shared extends FieldSiz
  * shader reads. Whoever draws adds runs of instances and writes their values, and before each frame is drawn, `flush`
  * copies every shown run into one buffer on the GPU. A run paints over the runs before it, in the order of
  * `BatchRun.order`, then the order they were added. When nothing has changed, `flush` copies nothing. A batch with
- * nothing in it isn't drawn, except on its first frame, which sets it up: Three.js then compiles its material and sends
- * its buffers to the GPU without drawing anything, rather than on the frame its first instance shows.
+ * nothing in it draws nothing, but its first frame sets it up: Three.js compiles its material and sends its buffers to
+ * the GPU then, rather than on the frame its first instance shows.
  */
 export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes = Record<never, number>> {
-  /** The one object that draws every instance. Add it to a scene. Its instances are never left out as off screen. */
+  /**
+   * The one object that draws every instance. Add it to a scene. Its instances are never left out as off screen. It gets
+   * a new geometry when the batch outgrows its room, so read `mesh.geometry` where it's needed rather than keeping it.
+   */
   readonly mesh: Mesh<InstancedBufferGeometry, Material>;
+  /** The batch's own copy of the shape each instance draws. */
   readonly #shape: BufferGeometry;
   readonly #layout: Layout;
   readonly #runs: BatchRun<Fields, Shared>[] = [];
@@ -45,7 +56,6 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
   readonly #range = { start: 0, count: 0 };
   #changed = false;
   #unsorted = false;
-  #first = true;
   #added = 0;
   /** How a run tells the batch what `flush` has to do. */
   readonly #listener: RunListener = {
@@ -58,10 +68,16 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
     },
   };
 
-  constructor(owner: Owner, { material, fields, shared, shape = square() }: BatchOptions<Fields, Shared>) {
-    this.#shape = owner.own(shape);
-    this.#layout = layoutOf(fields, shared ?? {}, shape);
-    this.mesh = owner.own(new Mesh(this.#geometry(INITIAL_CAPACITY), owner.own(material)));
+  constructor(owner: Owner, { material, fields, shared, shape }: BatchOptions<Fields, Shared>) {
+    // Three.js draws such a material in two passes, every instance's back, then every instance's front, so an earlier
+    // run's front would paint over a later run's back.
+    if (material.transparent && material.side === DoubleSide && !material.forceSinglePass) {
+      throw new Error("A batch's see-through material drawn on both sides needs forceSinglePass, or its runs paint out of order.");
+    }
+    // A copy of its own: outgrowing its room frees the GPU's copy of the shape, which anything else drawing it still uses.
+    this.#shape = owner.own(shape?.clone() ?? square());
+    this.#layout = layoutOf(fields, shared ?? {}, this.#shape);
+    this.mesh = owner.own(new Mesh(this.#geometry(INITIAL_CAPACITY), material));
     // The shape's bounds say nothing about where its instances are.
     this.mesh.frustumCulled = false;
     owner.onDispose(() => this.mesh.geometry.dispose());
@@ -79,21 +95,23 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
     return run;
   }
 
-  /** If anything changed, copies every shown run to the GPU. Call it each frame before the batch is drawn. */
+  /**
+   * If anything changed, copies every shown run to the GPU. Call it once a frame, before Three.js walks the scene to draw
+   * it: before `renderer.render`, or from the scene's `onBeforeRender`. A mesh's `onBeforeRender` is too late, since
+   * Three.js has sent the frame's buffers by then: the change would show a frame late, and a batch that outgrew its room
+   * would be drawn with the geometry it had just freed.
+   */
   flush(): void {
+    if (!this.#changed) return;
     const runs = this.#runs;
+    if (this.#unsorted) {
+      sortIntoPaintOrder(runs);
+      this.#unsorted = false;
+    }
     let count = 0;
     for (let index = 0; index < runs.length; index++) {
       const run = runs[index] as BatchRun<Fields, Shared>;
       if (run.visible) count += run.count;
-    }
-    // With nothing to draw it's skipped: Three.js does a mesh's work each frame it's shown, even with nothing in it.
-    this.mesh.visible = count > 0 || this.#first;
-    this.#first = false;
-    if (!this.#changed) return;
-    if (this.#unsorted) {
-      sortIntoPaintOrder(runs);
-      this.#unsorted = false;
     }
     if (count > this.#capacity) {
       this.mesh.geometry.dispose();
@@ -142,8 +160,10 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
     const buffer = new InstancedInterleavedBuffer(this.#values, stride).setUsage(DynamicDrawUsage);
     this.#buffer = buffer;
     const geometry = new InstancedBufferGeometry();
-    for (const [name, attribute] of Object.entries(this.#shape.attributes)) geometry.setAttribute(name, attribute);
-    geometry.setIndex(this.#shape.getIndex());
+    const shape = this.#shape;
+    for (const [name, attribute] of Object.entries(shape.attributes)) geometry.setAttribute(name, attribute);
+    geometry.setIndex(shape.getIndex());
+    geometry.setDrawRange(shape.drawRange.start, shape.drawRange.count);
     for (const { name, size, shared, offset } of places) {
       geometry.setAttribute(name, new InterleavedBufferAttribute(buffer, size, shared ? offset : sharedSize + offset));
     }
@@ -171,6 +191,7 @@ export class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends Fie
   #fields: Readonly<Record<keyof Fields | keyof Shared, BatchField>> | undefined;
 
   constructor(listener: RunListener, layout: Layout, count: number, added: number) {
+    checkCount(count);
     this.#listener = listener;
     this.#layout = layout;
     this.#count = count;
@@ -223,6 +244,7 @@ export class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends Fie
    * it gains start at 0, as a new run's do; it makes room only when it grows past any size it has had.
    */
   resize(count: number): void {
+    checkCount(count);
     if (count === this.#count) return;
     const { ownSize } = this.#layout;
     if (count * ownSize > this.#values.length) {
@@ -297,13 +319,16 @@ interface RunListener {
   moved(): void;
 }
 
-/** The layout of `fields` and `shared`, which can't reuse a name, or a name `shape` already has, such as `position`. */
+/**
+ * The layout of `fields` and `shared`, which can't reuse a name, or a name `shape` already has, such as `position`, nor
+ * need more attributes, with the shape's, than WebGL 2 promises.
+ */
 function layoutOf(fields: FieldSizes, shared: FieldSizes, shape: BufferGeometry): Layout {
   const places: FieldPlace[] = [];
   const sizes = { own: 0, shared: 0 };
   const place = (group: FieldSizes, isShared: boolean) => {
     for (const [name, size] of Object.entries(group)) {
-      if (name in shape.attributes) throw new Error(`A batch's value can't be named ${name}: its shape has an attribute of that name.`);
+      if (Object.hasOwn(shape.attributes, name)) throw new Error(`A batch's value can't be named ${name}: its shape has an attribute of that name.`);
       if (places.some((each) => each.name === name)) throw new Error(`A batch has two values named ${name}.`);
       if (!Number.isInteger(size) || size < 1 || size > 4) throw new Error(`A batch's value ${name} has ${size} numbers; a value has 1 to 4.`);
       places.push({ name, size, shared: isShared, offset: isShared ? sizes.shared : sizes.own });
@@ -313,7 +338,20 @@ function layoutOf(fields: FieldSizes, shared: FieldSizes, shape: BufferGeometry)
   };
   place(shared, true);
   place(fields, false);
+  // Past this the shader fails to link, and only on a GPU.
+  const attributes = places.length + Object.keys(shape.attributes).length;
+  if (attributes > MOST_ATTRIBUTES) {
+    throw new Error(`A batch's shape and values need ${attributes} attributes, and WebGL 2 promises ${MOST_ATTRIBUTES}: put small values together in one of up to 4 numbers.`);
+  }
   return { places, sharedSize: sizes.shared, ownSize: sizes.own };
+}
+
+/** The most attributes, a shape's and a batch's values together, that every WebGL 2 device draws with. */
+const MOST_ATTRIBUTES = 16;
+
+/** Throws unless `count` can be a run's number of instances: a whole number, 0 or more. */
+function checkCount(count: number): void {
+  if (!Number.isInteger(count) || count < 0) throw new Error(`A run can't have ${count} instances: it has a whole number of them, 0 or more.`);
 }
 
 /**
