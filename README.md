@@ -226,12 +226,18 @@ costs as much as all of them moving.
 - **Any shape.** A batch draws a flat square, corners from -1 to 1, unless you give it a `shape`. It draws a copy of the
   shape's attributes, index and draw range, so yours stays as it was; morph targets aren't drawn. Every copy draws all
   of it, so copies of different sizes of detail share the finest one.
-- **At most 16 attributes.** Each value is an attribute the shader reads, and so is each of the shape's, and WebGL 2
-  promises 16. A batch throws past that, so put small values together in one of up to 4 numbers.
+- **At most 16 attributes.** WebGL 2 promises a shader 16, and a browser can count every attribute the shader declares,
+  whether or not it reads it, as Chrome does. Each value takes one, and so does each of the shape's. Three.js declares
+  `position`, `normal` and `uv` in the shader of every material but a `RawShaderMaterial`, so the square leaves room for
+  13 values on a `ShaderMaterial` and 15 on a `RawShaderMaterial`. A batch throws past 16, so put small values together
+  in one of up to 4 numbers. A matrix among the shape's attributes takes an attribute for each of its columns, which the
+  batch counts as one.
 - **One material.** A batch draws with one material, so what differs goes in its fields. A texture array lets one
   material read many pictures: put which one in a field. The batch doesn't free the material, so own it as you own
   anything you make. Copies paint in order only when it draws in one pass: Three.js draws a see-through material that
   shows both sides twice, every back and then every front, so the batch throws unless `forceSinglePass` is on.
+- **No raycasts.** Only your shader knows where each copy is drawn, so Three.js's `Raycaster` can't find one, and the
+  batch's mesh never answers it. Find what's under the pointer from the values you gave the copies.
 
 ## Suggested standards
 
@@ -317,11 +323,13 @@ From `wobbree/batch`. Takes `material`, `fields`, and optionally `shared` and `s
 
 | | |
 | --- | --- |
-| `mesh` | The one object that draws everything. Add it to a scene. Its geometry is replaced when the batch outgrows its room. |
+| `mesh` | The one object that draws everything. Add it to a scene. Its `material` has the type of the one you gave, its geometry is replaced when the batch outgrows its room, and a raycast never hits it. |
 | `add(owner, count)` | Adds a run of `count` copies, until `owner` is freed. |
 | `flush()` | If anything changed, copies every shown run to the GPU. Call it once a frame, before Three.js walks the scene. |
 
 ### `BatchRun`
+
+What `add` returns. `BatchRun` and `BatchField` are exported as types, since only a batch makes them.
 
 | | |
 | --- | --- |

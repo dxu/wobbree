@@ -14,12 +14,12 @@ import type { Owner } from "./index.ts";
 /** Named values, each with how many numbers it has, 1 to 4. A shader reads each as an attribute of that name. */
 export type FieldSizes = Readonly<Record<string, number>>;
 
-export interface BatchOptions<Fields extends FieldSizes, Shared extends FieldSizes> {
+export interface BatchOptions<Fields extends FieldSizes, Shared extends FieldSizes, DrawnWith extends Material = Material> {
   /**
    * The material every instance is drawn with. The batch doesn't free it: whoever made it owns it. It has to draw in one
    * pass for runs to paint in order, so a see-through material drawn on both sides needs `forceSinglePass`.
    */
-  readonly material: Material;
+  readonly material: DrawnWith;
   /** The values each instance has of its own, which a run holds in `values`. */
   readonly fields: Fields;
   /** The values every instance of a run has alike, which it holds once, in `shared`. They come first in each instance. */
@@ -39,19 +39,23 @@ export interface BatchOptions<Fields extends FieldSizes, Shared extends FieldSiz
  * nothing in it draws nothing, but its first frame sets it up: Three.js compiles its material and sends its buffers to
  * the GPU then, rather than on the frame its first instance shows.
  */
-export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes = Record<never, number>> {
+export class Batch<
+  Fields extends FieldSizes = FieldSizes,
+  Shared extends FieldSizes = Record<never, number>,
+  DrawnWith extends Material = Material,
+> {
   /**
-   * The one object that draws every instance. Add it to a scene. Its instances are never left out as off screen. It gets
-   * a new geometry when the batch outgrows its room, so read `mesh.geometry` where it's needed rather than keeping it.
+   * The one object that draws every instance, with the material the batch was given. Add it to a scene. Its instances
+   * are never left out as off screen, and a raycast never hits it. It gets a new geometry when the batch outgrows its
+   * room, so read `mesh.geometry` where it's needed rather than keeping it.
    */
-  readonly mesh: Mesh<InstancedBufferGeometry, Material>;
+  readonly mesh: Mesh<InstancedBufferGeometry, DrawnWith>;
   /** The batch's own copy of the shape each instance draws. */
   readonly #shape: BufferGeometry;
   readonly #layout: Layout;
   readonly #runs: BatchRun<Fields, Shared>[] = [];
-  #capacity = 0;
-  #values = new Float32Array(0);
-  #buffer: InstancedInterleavedBuffer | undefined;
+  /** Where `flush` copies the instances to, which `mesh.geometry` draws from. */
+  #room: Room;
   /** The part of the buffer the last flush wrote, which the GPU copies: from its start. */
   readonly #range = { start: 0, count: 0 };
   #changed = false;
@@ -68,18 +72,21 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
     },
   };
 
-  constructor(owner: Owner, { material, fields, shared, shape }: BatchOptions<Fields, Shared>) {
+  constructor(owner: Owner, { material, fields, shared, shape }: BatchOptions<Fields, Shared, DrawnWith>) {
     // Three.js draws such a material in two passes, every instance's back, then every instance's front, so an earlier
     // run's front would paint over a later run's back.
     if (material.transparent && material.side === DoubleSide && !material.forceSinglePass) {
       throw new Error("A batch's see-through material drawn on both sides needs forceSinglePass, or its runs paint out of order.");
     }
     // A copy of its own: outgrowing its room frees the GPU's copy of the shape, which anything else drawing it still uses.
-    this.#shape = owner.own(shape?.clone() ?? square());
-    this.#layout = layoutOf(fields, shared ?? {}, this.#shape);
-    this.mesh = owner.own(new Mesh(this.#geometry(INITIAL_CAPACITY), material));
-    // The shape's bounds say nothing about where its instances are.
+    this.#shape = owner.own(shape?.clone() ?? genSquare());
+    this.#layout = genLayout(fields, shared ?? {}, this.#shape, material);
+    this.#room = genRoom(this.#shape, this.#layout, INITIAL_CAPACITY);
+    this.mesh = owner.own(new Mesh(this.#room.geometry, material));
+    // Only the shader knows where the instances are. The shape's bounds don't say, so they're never left out as off
+    // screen, and a ray that hit the shape where the mesh stands would hit none of them, so a raycast finds nothing.
     this.mesh.frustumCulled = false;
+    this.mesh.raycast = () => undefined;
     owner.onDispose(() => this.mesh.geometry.dispose());
   }
 
@@ -113,18 +120,21 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
       const run = runs[index] as BatchRun<Fields, Shared>;
       if (run.visible) count += run.count;
     }
-    if (count > this.#capacity) {
+    if (count > this.#room.capacity) {
+      // Made before the old room is freed, so a batch that can't get the memory stays as it was.
+      const room = genRoom(this.#shape, this.#layout, Math.max(count, this.#room.capacity * 2));
       this.mesh.geometry.dispose();
-      this.mesh.geometry = this.#geometry(Math.max(count, this.#capacity * 2));
+      this.mesh.geometry = room.geometry;
+      this.#room = room;
     }
     let at = 0;
     for (let index = 0; index < runs.length; index++) {
       const run = runs[index] as BatchRun<Fields, Shared>;
       if (run.visible) at = this.#write(run, at);
     }
-    const buffer = this.#buffer;
     // With nothing shown there's nothing to copy; a range of nothing would make WebGL copy the whole buffer.
-    if (buffer !== undefined && at > 0) {
+    if (at > 0) {
+      const buffer = this.#room.buffer;
       buffer.clearUpdateRanges();
       // The same range each time, so a frame where something moves makes no new object.
       this.#range.count = at;
@@ -138,7 +148,7 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
   /** Writes `run`'s instances into the buffer from value `at`. Returns where it ended. */
   #write(run: BatchRun<Fields, Shared>, at: number): number {
     const { sharedSize, ownSize } = this.#layout;
-    const target = this.#values;
+    const target = this.#room.values;
     const { shared, values, count } = run;
     const stride = sharedSize + ownSize;
     // Copied value by value: a view of `values` would be a new object for each instance, each frame something moves.
@@ -150,34 +160,17 @@ export class Batch<Fields extends FieldSizes = FieldSizes, Shared extends FieldS
     }
     return at + count * stride;
   }
-
-  /** The shape, with room for `capacity` instances. */
-  #geometry(capacity: number): InstancedBufferGeometry {
-    this.#capacity = capacity;
-    const { places, sharedSize, ownSize } = this.#layout;
-    const stride = sharedSize + ownSize;
-    this.#values = new Float32Array(capacity * stride);
-    const buffer = new InstancedInterleavedBuffer(this.#values, stride).setUsage(DynamicDrawUsage);
-    this.#buffer = buffer;
-    const geometry = new InstancedBufferGeometry();
-    const shape = this.#shape;
-    for (const [name, attribute] of Object.entries(shape.attributes)) geometry.setAttribute(name, attribute);
-    geometry.setIndex(shape.getIndex());
-    geometry.setDrawRange(shape.drawRange.start, shape.drawRange.count);
-    for (const { name, size, shared, offset } of places) {
-      geometry.setAttribute(name, new InterleavedBufferAttribute(buffer, size, shared ? offset : sharedSize + offset));
-    }
-    geometry.instanceCount = 0;
-    return geometry;
-  }
 }
 
+// A batch makes its runs, and a run its fields, so they leave this file as types to name, not classes to construct.
+export type { BatchField, BatchRun };
+
 /**
- * A run of instances in a `Batch`. Its `fields` set its values by name: `run.fields.place.set(10, 20)`. Code that writes
- * many at once can write its instances' values straight into `values`, one instance after another, and what they all have
- * alike into `shared`, then call `changed`.
+ * A run of instances in a `Batch`, which `Batch.add` returns. Its `fields` set its values by name:
+ * `run.fields.place.set(10, 20)`. Code that writes many at once can write its instances' values straight into `values`,
+ * one instance after another, and what they all have alike into `shared`, then call `changed`.
  */
-export class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes = Record<never, number>> {
+class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes = Record<never, number>> {
   /** The values every instance of the run has alike. */
   readonly shared: Float32Array;
   /** When it was added, among its batch's runs, which settles the order of runs of the same `order`. */
@@ -268,7 +261,7 @@ export class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends Fie
  * One named value of a run, set with up to four numbers: `place.set(10, 20)`, or `place.setAt(3, 10, 20)` for an instance
  * past the first. A value every instance shares has one place, whichever instance it's asked for.
  */
-export class BatchField {
+class BatchField {
   readonly #run: Pick<BatchRun, "values" | "shared" | "changed">;
   readonly #place: FieldPlace;
   /** How many values each instance of the run has of its own. */
@@ -319,11 +312,20 @@ interface RunListener {
   moved(): void;
 }
 
+/** Room for a batch's instances: the numbers `flush` writes, the buffer that takes them to the GPU, and the geometry that draws them. */
+interface Room {
+  /** How many instances fit. */
+  readonly capacity: number;
+  readonly values: Float32Array;
+  readonly buffer: InstancedInterleavedBuffer;
+  readonly geometry: InstancedBufferGeometry;
+}
+
 /**
  * The layout of `fields` and `shared`, which can't reuse a name, or a name `shape` already has, such as `position`, nor
- * need more attributes, with the shape's, than WebGL 2 promises.
+ * give the shader of `material` more attributes than WebGL 2 promises.
  */
-function layoutOf(fields: FieldSizes, shared: FieldSizes, shape: BufferGeometry): Layout {
+function genLayout(fields: FieldSizes, shared: FieldSizes, shape: BufferGeometry, material: Material): Layout {
   const places: FieldPlace[] = [];
   const sizes = { own: 0, shared: 0 };
   const place = (group: FieldSizes, isShared: boolean) => {
@@ -338,16 +340,24 @@ function layoutOf(fields: FieldSizes, shared: FieldSizes, shape: BufferGeometry)
   };
   place(shared, true);
   place(fields, false);
-  // Past this the shader fails to link, and only on a GPU.
-  const attributes = places.length + Object.keys(shape.attributes).length;
-  if (attributes > MOST_ATTRIBUTES) {
-    throw new Error(`A batch's shape and values need ${attributes} attributes, and WebGL 2 promises ${MOST_ATTRIBUTES}: put small values together in one of up to 4 numbers.`);
+  // Past the limit the shader fails to link, and only on a GPU. A browser can give a slot to every attribute a shader
+  // declares, read or not, as Chrome does, so the ones Three.js declares count too.
+  const declared = new Set(Object.keys(shape.attributes));
+  for (const { name } of places) declared.add(name);
+  if (!("isRawShaderMaterial" in material)) for (const name of THREE_DECLARES) declared.add(name);
+  if (declared.size > MOST_ATTRIBUTES) {
+    throw new Error(
+      `A batch needs ${declared.size} attributes, and WebGL 2 promises ${MOST_ATTRIBUTES}: its values, its shape's, and the position, ` +
+        "normal and uv that Three.js declares unless the material is a RawShaderMaterial. Put small values together in one of up to 4 numbers.",
+    );
   }
   return { places, sharedSize: sizes.shared, ownSize: sizes.own };
 }
 
-/** The most attributes, a shape's and a batch's values together, that every WebGL 2 device draws with. */
+/** The most attributes a shader can declare and still draw on every WebGL 2 device. */
 const MOST_ATTRIBUTES = 16;
+/** The attributes Three.js declares at the start of every vertex shader but a `RawShaderMaterial`'s. */
+const THREE_DECLARES = ["position", "normal", "uv"];
 
 /** Throws unless `count` can be a run's number of instances: a whole number, 0 or more. */
 function checkCount(count: number): void {
@@ -371,8 +381,25 @@ function sortIntoPaintOrder<Run extends Pick<BatchRun, "order" | "added">>(runs:
   }
 }
 
+/** Room for `capacity` instances of `shape`, each laid out as `layout` says. */
+function genRoom(shape: BufferGeometry, layout: Layout, capacity: number): Room {
+  const { places, sharedSize, ownSize } = layout;
+  const stride = sharedSize + ownSize;
+  const values = new Float32Array(capacity * stride);
+  const buffer = new InstancedInterleavedBuffer(values, stride).setUsage(DynamicDrawUsage);
+  const geometry = new InstancedBufferGeometry();
+  for (const [name, attribute] of Object.entries(shape.attributes)) geometry.setAttribute(name, attribute);
+  geometry.setIndex(shape.getIndex());
+  geometry.setDrawRange(shape.drawRange.start, shape.drawRange.count);
+  for (const { name, size, shared, offset } of places) {
+    geometry.setAttribute(name, new InterleavedBufferAttribute(buffer, size, shared ? offset : sharedSize + offset));
+  }
+  geometry.instanceCount = 0;
+  return { capacity, values, buffer, geometry };
+}
+
 /** A flat square with corners from -1 to 1. */
-function square(): BufferGeometry {
+function genSquare(): BufferGeometry {
   const geometry = new BufferGeometry();
   geometry.setAttribute("position", new BufferAttribute(new Float32Array(SQUARE), 3));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);

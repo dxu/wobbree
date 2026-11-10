@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BoxGeometry, DoubleSide, type InterleavedBuffer, type InterleavedBufferAttribute, RawShaderMaterial } from "three";
+import {
+  BoxGeometry,
+  DoubleSide,
+  type InterleavedBuffer,
+  type InterleavedBufferAttribute,
+  Mesh,
+  RawShaderMaterial,
+  Raycaster,
+  ShaderMaterial,
+  Vector3,
+} from "three";
 import { Batch } from "../src/batch.ts";
 import { Owner } from "../src/index.ts";
 
@@ -118,9 +128,42 @@ test("a value can't take a name its shape's own attributes have", () => {
 
 test("a shape and its values take at most 16 attributes, as many as WebGL 2 promises", () => {
   const owner = new Owner();
-  // The square's corners take one.
+  // A raw material's shader declares only what's written in it, so the square's corners take one and the values the rest.
   assert.doesNotThrow(() => new Batch(owner, { material: new RawShaderMaterial(), fields: manyValues(15) }));
   assert.throws(() => new Batch(owner, { material: new RawShaderMaterial(), fields: manyValues(16) }), /17 attributes/);
+});
+
+test("the position, normal and uv Three.js declares for any other material count toward the 16", () => {
+  const owner = new Owner();
+  // Chrome draws the square with 13 values on a ShaderMaterial and refuses the shader with 14.
+  assert.doesNotThrow(() => new Batch(owner, { material: new ShaderMaterial(), fields: manyValues(13) }));
+  assert.throws(() => new Batch(owner, { material: new ShaderMaterial(), fields: manyValues(14) }), /17 attributes/);
+  // A shape that has a normal and a uv of its own takes the same three, not five.
+  assert.doesNotThrow(() => new Batch(owner, { material: new ShaderMaterial(), fields: manyValues(13), shape: new BoxGeometry() }));
+  assert.throws(() => new Batch(owner, { material: new ShaderMaterial(), fields: manyValues(14), shape: new BoxGeometry() }), /17 attributes/);
+});
+
+test("the mesh keeps the type of the material the batch was given", () => {
+  const owner = new Owner();
+  const material = new ShaderMaterial({ uniforms: { fade: { value: 1 } } });
+  const batch = new Batch(owner, { material, fields: { place: 2 } });
+  // Reading `uniforms` type-checks only while the mesh's material is still a ShaderMaterial.
+  assert.equal(batch.mesh.material.uniforms, material.uniforms);
+});
+
+test("a raycast never hits a batch's mesh, since only its shader knows where the instances are", () => {
+  const owner = new Owner();
+  const batch = batchOf(owner);
+  batch.add(owner, 1);
+  batch.flush();
+  const ray = new Raycaster(new Vector3(0, 0, 5), new Vector3(0, 0, -1));
+  assert.deepEqual(ray.intersectObject(batch.mesh), []);
+  // The same ray hits the bare shape when a plain mesh draws it, so it's the batch that turns the ray away.
+  assert.notEqual(ray.intersectObject(new Mesh(batch.mesh.geometry, batch.mesh.material)).length, 0);
+});
+
+test("the module exports the batch alone: runs and fields leave it as types, since only a batch makes them", async () => {
+  assert.deepEqual(Object.keys(await import("../src/batch.ts")), ["Batch"]);
 });
 
 test("a see-through material drawn on both sides has to draw in one pass, or runs would paint out of order", () => {
@@ -225,6 +268,21 @@ test("growing frees the geometry it outgrew, and never touches the shape it was 
   // Freeing a geometry frees the GPU's copy of every attribute in it, so the batch draws attributes of its own.
   assert.notEqual(batch.mesh.geometry.getAttribute("position"), shape.getAttribute("position"));
   assert.deepEqual(batch.mesh.geometry.drawRange, { start: 6, count: 6 });
+});
+
+test("a batch that can't get the memory to grow stays as it was, and grows the next time", () => {
+  const owner = new Owner();
+  const batch = new Batch(owner, { material: new RawShaderMaterial(), fields: {}, shared: { tint: 4 } });
+  const run = batch.add(owner, Number.MAX_SAFE_INTEGER);
+  // No array is that long, so making room for it fails.
+  assert.throws(() => batch.flush(), RangeError);
+  run.resize(65);
+  batch.flush();
+  const tint = (batch.mesh.geometry.getAttribute("tint") as InterleavedBufferAttribute).data;
+  assert.equal(batch.mesh.geometry.instanceCount, 65);
+  // The buffer has room for all 65, and the part the GPU is sent lies inside it.
+  assert.equal(tint.array.length >= 65 * 4, true);
+  assert.deepEqual(tint.updateRanges, [{ start: 0, count: 65 * 4 }]);
 });
 
 test("resizing keeps what stays and starts what's new at 0", () => {
