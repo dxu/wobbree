@@ -215,23 +215,27 @@ sprites.flush(); // once a frame, before renderer.render
 costs as much as all of them moving.
 
 - **Flush before Three.js walks the scene:** before `renderer.render`, or from the scene's `onBeforeRender`. Three.js
-  sends the frame's buffers to the GPU while it walks the scene, so a flush from a mesh's `onBeforeRender` shows a frame
-  late.
+  sends the frame's buffers to the GPU while it walks the scene, so after a flush from a mesh's `onBeforeRender` that
+  frame draws the new number of copies from the values the GPU already had.
 - **Copies paint in order.** A run paints over the runs before it. Set `order`, such as from how far away each one stands,
-  and they sort: drawn things with soft edges have to be painted back to front.
+  and they sort: drawn things with soft edges have to be painted back to front. Among the scene's other see-through
+  objects the whole batch sorts as one, by its mesh's `renderOrder` and where the mesh stands.
 - **Runs group copies.** `add(owner, count)` adds a run of `count` copies, and `setAt(index, ...)` sets a copy past the
   first. Values given as `shared` are the same for every copy of a run, and held once, so a line of letters moves by
   setting one value. A run hides whole, so what hides on its own needs a run of its own. For a run of many copies, writing
-  to `values` and calling `changed` is faster than setting each one.
+  to `values` and calling `changed` is faster than setting each one: each copy's numbers lie in the order its values
+  were named. A run that grows past any size it has had gets a new `values`, so read it again after a `resize`.
 - **Any shape.** A batch draws a flat square, corners from -1 to 1, unless you give it a `shape`. It draws a copy of the
   shape's attributes, index and draw range, so yours stays as it was; morph targets aren't drawn. Every copy draws all
   of it, so copies of different sizes of detail share the finest one.
 - **At most 16 attributes.** WebGL 2 promises a shader 16, and a browser can count every attribute the shader declares,
-  whether or not it reads it, as Chrome does. Each value takes one, and so does each of the shape's. Three.js declares
-  `position`, `normal` and `uv` in the shader of every material but a `RawShaderMaterial`, so the square leaves room for
-  13 values on a `ShaderMaterial` and 15 on a `RawShaderMaterial`. A batch throws past 16, so put small values together
-  in one of up to 4 numbers. A matrix among the shape's attributes takes an attribute for each of its columns, which the
-  batch counts as one.
+  whether or not it reads it, as Chrome does. A batch counts one for each value and one for each attribute its shape
+  has, read or not, since it can't see the shader. For every material but a `RawShaderMaterial` it also counts the
+  `position`, `normal` and `uv` Three.js declares, and `color` when the material has `vertexColors`. So the square leaves
+  room for 13 values on a `ShaderMaterial` and 15 on a `RawShaderMaterial`. A batch throws past 16: put small values
+  together in one of up to 4 numbers, and give it a shape with only the attributes its shader reads. Three things it
+  can't see take more: a matrix among the shape's attributes takes one for each of its columns, a map that reads a
+  second set of uvs makes Three.js declare it, and so does a `define` that switches one of Three.js's attributes on.
 - **One material.** A batch draws with one material, so what differs goes in its fields. A texture array lets one
   material read many pictures: put which one in a field. The batch doesn't free the material, so own it as you own
   anything you make. Copies paint in order only when it draws in one pass: Three.js draws a see-through material that
@@ -324,7 +328,7 @@ From `wobbree/batch`. Takes `material`, `fields`, and optionally `shared` and `s
 | | |
 | --- | --- |
 | `mesh` | The one object that draws everything. Add it to a scene. Its `material` has the type of the one you gave, its geometry is replaced when the batch outgrows its room, and a raycast never hits it. |
-| `add(owner, count)` | Adds a run of `count` copies, until `owner` is freed. |
+| `add(owner, count)` | Adds a run of `count` copies, until `owner` is freed. After that, writing to the run does nothing. |
 | `flush()` | If anything changed, copies every shown run to the GPU. Call it once a frame, before Three.js walks the scene. |
 
 ### `BatchRun`
@@ -334,9 +338,10 @@ What `add` returns. `BatchRun` and `BatchField` are exported as types, since onl
 | | |
 | --- | --- |
 | `fields` | Each value by name, as a `BatchField`, with `set(a, b?, c?, d?)` for the first copy and `setAt(index, a, b?, c?, d?)` for any. |
-| `order` | Where it paints: over lower orders, and over runs of its own order added before it. |
+| `order` | Where it paints: over lower orders, and over runs of its own order added before it. 0 unless you set it. |
+| `added` | Which run it was to be added to its batch, counting from 0: what settles runs of the same order. |
 | `visible` | Whether it's drawn. Hidden, it isn't copied to the GPU. |
-| `values`, `shared`, `changed()` | The numbers themselves, for writing many at once. Call `changed` after. |
+| `values`, `shared`, `changed()` | The numbers themselves, for writing many at once. Call `changed` after. `values` is a new array once the run grows past any size it has had. |
 | `count`, `resize(count)` | How many copies it has. Resizing keeps its place. |
 
 ## Performance

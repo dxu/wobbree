@@ -1,7 +1,7 @@
 {
   "name": "wobbree",
   "version": "0.2.0",
-  "description": "A very light set of ideas for building games with Three.js: owners that free what they create, entities, lists, scenes, and a stage that draws them.",
+  "description": "A very light set of ideas for building games with Three.js: owners that free what they create, entities, lists, scenes, a stage that draws them, and batches that draw many copies of a shape in one draw call.",
   "keywords": [
     "three",
     "three.js",
