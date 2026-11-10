@@ -1,4 +1,5 @@
 import {
+  Box3,
   BufferAttribute,
   BufferGeometry,
   DoubleSide,
@@ -103,13 +104,14 @@ export class Batch<
    * order added before it.
    */
   add(owner: Owner, count: number): BatchRun<Fields, Shared> {
-    const run = new BatchRun<Fields, Shared>(this.#listener, this.#layout, count, this.#added++);
+    const run = new BatchRun<Fields, Shared>(this.#listener, this.#layout, count, this.#added);
+    this.#added++;
     this.#runs.push(run);
     this.#listener.moved();
     owner.onDispose(() => {
       this.#runs.splice(this.#runs.indexOf(run), 1);
       this.#listener.changed();
-      BatchRun.free(run);
+      cutOff(run);
     });
     return run;
   }
@@ -179,6 +181,12 @@ export class Batch<
 export type { BatchField, BatchRun };
 
 /**
+ * Cuts a freed run off from its batch, which draws none of it any more, so writing to it copies nothing. `BatchRun`
+ * sets this as it's defined, since only a run's own class can reach the listener it keeps to itself.
+ */
+let cutOff: (run: BatchRun<FieldSizes, FieldSizes>) => void;
+
+/**
  * A run of instances in a `Batch`, which `Batch.add` returns. Its `fields` set its values by name:
  * `run.fields.place.set(10, 20)`. Code that writes many at once can write its instances' values straight into `values`,
  * one instance after another, and what they all have alike into `shared`, then call `changed`.
@@ -206,9 +214,10 @@ class BatchRun<Fields extends FieldSizes = FieldSizes, Shared extends FieldSizes
     this.shared = new Float32Array(layout.sharedSize);
   }
 
-  /** Cuts a freed run off from its batch, which draws none of it any more, so writing to it copies nothing. */
-  static free(run: BatchRun<FieldSizes, FieldSizes>): void {
-    run.#listener = NOBODY;
+  static {
+    cutOff = (run) => {
+      run.#listener = NOBODY;
+    };
   }
 
   /** The run's values by name, made the first time they're asked for, so a run written through `values` holds none. */
@@ -427,9 +436,12 @@ function genRoom(shape: BufferGeometry, layout: Layout, capacity: number): Room 
     geometry.setAttribute(name, new InterleavedBufferAttribute(buffer, size, shared ? offset : sharedSize + offset));
   }
   geometry.instanceCount = 0;
-  // Three.js sorts see-through objects by the middle of their geometry's bounding sphere, and would work one out from
-  // the shape. The instances are wherever the shader puts them, so the batch sorts by where its mesh stands.
-  geometry.boundingSphere = new Sphere(new Vector3(), 0);
+  // Three.js would work the geometry's bounds out from the shape, which says nothing about where the shader draws the
+  // instances, so they're set here. The sphere is round everything, so nothing that culls by it drops the batch, and
+  // its middle is where the mesh stands, which is what see-through objects are sorted by. The box is round nothing,
+  // so a scene's bounds leave the batch out.
+  geometry.boundingSphere = new Sphere(new Vector3(), Infinity);
+  geometry.boundingBox = new Box3();
   return { capacity, values, buffer, geometry };
 }
 

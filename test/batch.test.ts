@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  Box3,
   BoxGeometry,
   BufferGeometry,
   DoubleSide,
@@ -79,6 +80,8 @@ test("flush writes runs in the order they were added, each over the one before",
   batch.flush();
   assert.deepEqual(written(batch), [1, 2, 3, 4, 5, 6]);
   assert.equal(batch.mesh.geometry.instanceCount, 3);
+  // Each run knows which it was to be added, counting from 0.
+  assert.deepEqual([first.added, second.added], [0, 1]);
 });
 
 test("the mesh draws its shape once for each instance, and is never left out as off screen", () => {
@@ -88,7 +91,8 @@ test("the mesh draws its shape once for each instance, and is never left out as 
   batch.flush();
   assert.equal(batch.mesh.geometry.isInstancedBufferGeometry, true);
   // The values step once for each instance, where a plain buffer would step once for each corner of the shape.
-  assert.equal("isInstancedInterleavedBuffer" in buffer(batch), true);
+  const values = buffer(batch);
+  assert.equal("isInstancedInterleavedBuffer" in values && "meshPerAttribute" in values && values.meshPerAttribute, 1);
   // They change from frame to frame, and the GPU is told so.
   assert.equal(buffer(batch).usage, DynamicDrawUsage);
   assert.equal(batch.mesh.frustumCulled, false);
@@ -104,6 +108,10 @@ test("flush sends the GPU just the part of the buffer in use, and nothing when n
   const version = buffer(batch).version;
   batch.flush();
   assert.equal(buffer(batch).version, version);
+  // A later flush sends the part in use by then.
+  batch.add(owner, 1);
+  batch.flush();
+  assert.deepEqual(buffer(batch).updateRanges, [{ start: 0, count: 12 }]);
 });
 
 test("with nothing shown, flush sends the GPU nothing", () => {
@@ -163,6 +171,22 @@ test("a run added later is sorted into its place", () => {
   assert.deepEqual(written(batch), [1, 1, 5, 5]);
 });
 
+test("a run reordered while hidden comes back where its new order puts it", () => {
+  const owner = new Owner();
+  const batch = batchOf(owner);
+  const first = batch.add(owner, 1);
+  const second = batch.add(owner, 1);
+  fill(first.values, 1, 1);
+  fill(second.values, 2, 2);
+  first.visible = false;
+  batch.flush();
+  first.order = 5;
+  batch.flush();
+  first.visible = true;
+  batch.flush();
+  assert.deepEqual(written(batch), [2, 2, 1, 1]);
+});
+
 test("shared values reach every instance of a run, before its own", () => {
   const owner = new Owner();
   const batch = batchOf(owner, { anchor: 1 });
@@ -188,6 +212,23 @@ test("a run's values can be set by name", () => {
   // Each name reads its own numbers, as many as it has.
   assert.deepEqual([read(batch, "lift", 1), read(batch, "place", 1), read(batch, "tint", 1)], [[7], [30, 40], [0.5]]);
   assert.equal(hand.fields.place, place);
+});
+
+test("a value set by name writes its own numbers and no others", () => {
+  const owner = new Owner();
+  const batch = new Batch(owner, { material: new RawShaderMaterial(), fields: { spot: 3, tint: 4, lift: 1, edge: 2 } });
+  const run = batch.add(owner, 1);
+  const { spot, tint, lift, edge } = run.fields;
+  spot.set(1, 2, 3);
+  tint.set(4, 5, 6, 7);
+  edge.set(9, 10);
+  // Set last, and it leaves the numbers on either side of it as they were.
+  lift.set(8);
+  batch.flush();
+  assert.deepEqual(
+    [read(batch, "spot", 0), read(batch, "tint", 0), read(batch, "lift", 0), read(batch, "edge", 0)],
+    [[1, 2, 3], [4, 5, 6, 7], [8], [9, 10]],
+  );
 });
 
 test("a value can't take a name its shape's own attributes have", () => {
@@ -223,6 +264,8 @@ test("so does the color Three.js declares for a material with vertexColors", () 
   assert.throws(() => new Batch(owner, { material, fields: manyValues(13) }), /17 attributes/);
   // A value named color is that same attribute, so it's counted once.
   assert.doesNotThrow(() => new Batch(owner, { material, fields: { ...manyValues(12), color: 3 } }));
+  // A raw material's shader has no color unless it's written in it.
+  assert.doesNotThrow(() => new Batch(owner, { material: new RawShaderMaterial({ vertexColors: true }), fields: manyValues(15) }));
 });
 
 test("the mesh keeps the type of the material the batch was given", () => {
@@ -246,6 +289,7 @@ test("a raycast never hits a batch's mesh, since only its shader knows where the
   assert.deepEqual(ray.intersectObject(batch.mesh), []);
   // Nor once something has worked the square's own bounds out, which a ray is tested against first.
   batch.mesh.geometry.computeBoundingSphere();
+  batch.mesh.geometry.computeBoundingBox();
   assert.deepEqual(ray.intersectObject(batch.mesh), []);
   // The same ray hits the square when a plain mesh draws it, so it's the batch that turns the ray away.
   const square = new BufferGeometry();
@@ -262,15 +306,25 @@ test("a raycast never hits a batch's mesh, since only its shader knows where the
   );
 });
 
-test("a batch sorts by where its mesh stands: Three.js works no bounding sphere out from its shape", () => {
+test("a batch's bounds come from where its mesh stands, never from its shape", () => {
   const owner = new Owner();
+  const scene = new Scene();
   const shape = new BoxGeometry().translate(5, 0, 0);
   const batch = new Batch(owner, { material: new RawShaderMaterial(), fields: { place: 2 }, shape });
-  assert.deepEqual(batch.mesh.geometry.boundingSphere?.center.toArray(), [0, 0, 0]);
-  // The geometry it grows into is set up the same way.
-  batch.add(owner, 1000);
-  batch.flush();
-  assert.deepEqual(batch.mesh.geometry.boundingSphere?.center.toArray(), [0, 0, 0]);
+  scene.add(batch.mesh);
+  // The geometry a batch grows into is set up as its first is.
+  for (const grown of [false, true]) {
+    if (grown) {
+      batch.add(owner, 1000);
+      batch.flush();
+    }
+    const { boundingSphere } = batch.mesh.geometry;
+    // See-through objects sort by the sphere's middle, and what culls by the sphere never drops the batch.
+    assert.deepEqual(boundingSphere?.center.toArray(), [0, 0, 0]);
+    assert.equal(boundingSphere?.radius, Infinity);
+    // A scene's bounds leave the batch out: its instances are wherever its shader puts them.
+    assert.equal(new Box3().setFromObject(scene).isEmpty(), true);
+  }
 });
 
 test("the module exports the batch alone: runs and fields leave it as types, since only a batch makes them", async () => {
@@ -291,6 +345,8 @@ test("a run has a whole number of instances, 0 or more", () => {
   const batch = batchOf(owner);
   for (const count of [-1, 1.5, Number.NaN]) assert.throws(() => batch.add(owner, count), /instances/);
   const run = batch.add(owner, 1);
+  // A run that was refused isn't counted among those added.
+  assert.equal(run.added, 0);
   fill(run.values, 1, 2);
   assert.throws(() => run.resize(-1), /instances/);
   batch.flush();
@@ -404,9 +460,14 @@ test("growing frees the geometry it outgrew, and never touches the shape it was 
   batch.add(owner, 1000);
   batch.flush();
   assert.deepEqual(log, ["outgrown"]);
+  // The geometry it grew into draws the whole shape still: its attributes, its index and its draw range.
+  const grown = batch.mesh.geometry;
+  assert.deepEqual(Object.keys(grown.attributes).toSorted(), ["normal", "place", "position", "uv"]);
+  assert.deepEqual([...grown.getAttribute("position").array], [...shape.getAttribute("position").array]);
+  assert.deepEqual([...(grown.getIndex()?.array ?? [])], [...(shape.getIndex()?.array ?? [])]);
+  assert.deepEqual(grown.drawRange, { start: 6, count: 6 });
   // Freeing a geometry frees the GPU's copy of every attribute in it, so the batch draws attributes of its own.
-  assert.notEqual(batch.mesh.geometry.getAttribute("position"), shape.getAttribute("position"));
-  assert.deepEqual(batch.mesh.geometry.drawRange, { start: 6, count: 6 });
+  assert.notEqual(grown.getAttribute("position"), shape.getAttribute("position"));
 });
 
 test("a batch that can't get the memory to grow stays as it was, and grows the next time", () => {
@@ -431,11 +492,14 @@ test("resizing keeps what stays and starts what's new at 0", () => {
   const owner = new Owner();
   const batch = batchOf(owner);
   const run = batch.add(owner, 2);
-  fill(run.values, 1, 2, 3, 4);
+  const values = run.values;
+  fill(values, 1, 2, 3, 4);
   run.resize(1);
   run.resize(2);
   batch.flush();
   assert.deepEqual(written(batch), [1, 2, 0, 0]);
+  // Back inside the room it had, it writes to the same values.
+  assert.equal(run.values, values);
 });
 
 test("a run that grows past its room keeps what stays, starts the rest at 0, and has new values to write to", () => {

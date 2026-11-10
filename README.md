@@ -233,9 +233,10 @@ costs as much as all of them moving.
   has, read or not, since it can't see the shader. For every material but a `RawShaderMaterial` it also counts the
   `position`, `normal` and `uv` Three.js declares, and `color` when the material has `vertexColors`. So the square leaves
   room for 13 values on a `ShaderMaterial` and 15 on a `RawShaderMaterial`. A batch throws past 16: put small values
-  together in one of up to 4 numbers, and give it a shape with only the attributes its shader reads. Three things it
+  together in one of up to 4 numbers, and give it a shape with only the attributes its shader reads. Some things it
   can't see take more: a matrix among the shape's attributes takes one for each of its columns, a map that reads a
   second set of uvs makes Three.js declare it, and so does a `define` that switches one of Three.js's attributes on.
+  It counts once, when it's made, so `vertexColors` switched on later isn't counted either.
 - **One material.** A batch draws with one material, so what differs goes in its fields. A texture array lets one
   material read many pictures: put which one in a field. The batch doesn't free the material, so own it as you own
   anything you make. Copies paint in order only when it draws in one pass: Three.js draws a see-through material that
